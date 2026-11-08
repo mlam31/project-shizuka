@@ -23,6 +23,7 @@ impl Database {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS cards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deck TEXT NOT NULL,
                 front TEXT NOT NULL,
                 back TEXT NOT NULL,
                 repetitions INTEGER NOT NULL,
@@ -35,14 +36,15 @@ impl Database {
         Ok(())
     }
 
-    /// Creates a new flashcard.
-    pub fn save_card(&self, front: &str, back: &str) -> Result<i64> {
+    /// Creates a new flashcard in a specific deck.
+    pub fn save_card(&self, deck: &str, front: &str, back: &str) -> Result<i64> {
         let default_state = CardState::default();
 
         self.conn.execute(
-            "INSERT INTO cards (front, back, repetitions, ease_factor, interval, next_review)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO cards (deck, front, back, repetitions, ease_factor, interval, next_review)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
+                deck,
                 front,
                 back,
                 default_state.repetitions,
@@ -56,25 +58,51 @@ impl Database {
         Ok(id)
     }
 
-    /// Retrieves all cards that are due for review.
-    pub fn get_due_cards(&self) -> Result<Vec<Card>> {
+    /// Seeds the database with initial study material.
+    pub fn seed_starter_deck(&self) -> Result<()> {
+        let deck_name = "Fundamentals";
+
+        // Simple Hiragana/Katakana starter
+        let items = vec![
+            ("あ", "a"),
+            ("い", "i"),
+            ("う", "u"),
+            ("え", "e"),
+            ("お", "o"),
+            ("か", "ka"),
+            ("き", "ki"),
+            ("く", "ku"),
+            ("け", "ke"),
+            ("こ", "ko"),
+        ];
+
+        for (front, back) in items {
+            self.save_card(deck_name, front, back)?;
+        }
+
+        Ok(())
+    }
+
+    /// Retrieves all cards that are due for review in a specific deck.
+    pub fn get_due_cards(&self, deck: &str) -> Result<Vec<Card>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, front, back, repetitions, ease_factor, interval, next_review
+            "SELECT id, deck, front, back, repetitions, ease_factor, interval, next_review
              FROM cards
-             WHERE next_review <= ?1
+             WHERE deck = ?1 AND next_review <= ?2
              ORDER BY next_review ASC",
         ).context("Failed to prepare due cards query")?;
 
-        let card_iter = stmt.query_map(params![Utc::now().timestamp()], |row| {
-            let next_review_ts = row.get::<_, i64>(6)?;
+        let card_iter = stmt.query_map(params![deck, Utc::now().timestamp()], |row| {
+            let next_review_ts = row.get::<_, i64>(7)?;
             Ok(Card {
                 id: row.get(0)?,
-                front: row.get(1)?,
-                back: row.get(2)?,
+                deck: row.get(1)?,
+                front: row.get(2)?,
+                back: row.get(3)?,
                 state: CardState {
-                    repetitions: row.get(3)?,
-                    ease_factor: row.get(4)?,
-                    interval: row.get(5)?,
+                    repetitions: row.get(4)?,
+                    ease_factor: row.get(5)?,
+                    interval: row.get(6)?,
                     next_review: DateTime::from_timestamp(next_review_ts, 0)
                         .unwrap_or_else(|| Utc::now()),
                 },
@@ -122,12 +150,12 @@ mod tests {
         cleanup();
         let db = Database::new(TEST_DB).unwrap();
 
-        // Test save
-        let id = db.save_card("こんにちは", "Hello").unwrap();
+        // Test save with deck
+        let id = db.save_card("TestDeck", "こんにちは", "Hello").unwrap();
         assert_eq!(id, 1);
 
         // Test retrieval
-        let cards = db.get_due_cards().unwrap();
+        let cards = db.get_due_cards("TestDeck").unwrap();
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].front, "こんにちは");
 
@@ -136,8 +164,20 @@ mod tests {
         state.repetitions = 10;
         db.update_card(id, &state).unwrap();
 
-        let updated_cards = db.get_due_cards().unwrap();
+        let updated_cards = db.get_due_cards("TestDeck").unwrap();
         assert_eq!(updated_cards[0].state.repetitions, 10);
+
+        cleanup();
+    }
+
+    #[test]
+    fn test_seeding() {
+        cleanup();
+        let db = Database::new(TEST_DB).unwrap();
+        db.seed_starter_deck().unwrap();
+
+        let cards = db.get_due_cards("Fundamentals").unwrap();
+        assert!(cards.len() > 0);
 
         cleanup();
     }

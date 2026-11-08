@@ -1,1 +1,1 @@
-// Slint UI definitions
+slint::include_modules!();

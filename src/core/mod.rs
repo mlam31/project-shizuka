@@ -54,9 +54,17 @@ impl Default for CardState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Card {
     pub id: i64,
+    pub deck: String,
     pub front: String,
     pub back: String,
     pub state: CardState,
+}
+
+/// A deck of flashcards.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Deck {
+    pub id: i64,
+    pub name: String,
 }
 
 /// Calculates the next state of a card based on the user's review result using the SM-2 algorithm.

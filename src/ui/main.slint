@@ -1,0 +1,128 @@
+export enum AppState {
+    Welcome,
+    Reviewing,
+}
+
+export component AppWindow inherits Window {
+    width: 375px;
+    height: 812px;
+    title: "Shizuka";
+    background: #000000; // Pure black for OLED
+
+    // Properties for Rust to set
+    // Note: Slint properties are accessible via setter methods in Rust
+    in-out property <string> card_front: "";
+    in-out property <string> card_back: "";
+    in-out property <AppState> current_state: AppState.Welcome;
+    in-out property <bool> is_revealed: false;
+
+    // Callbacks for UI to trigger
+    callback start_review();
+    callback reveal_card();
+    callback rate_card(int);
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 20px;
+        alignment: center;
+
+        if (root.current_state == AppState.Welcome) : VerticalLayout {
+            spacing: 30px;
+            alignment: center;
+
+            Text {
+                text: "SHIZUKA";
+                color: #FFFFFF;
+                font-size: 32px;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: "Ready to learn?";
+                color: #888888;
+                font-size: 18px;
+                horizontal-alignment: center;
+            }
+
+            Rectangle {
+                width: 200px;
+                height: 50px;
+                border-width: 2px;
+                border-color: #FFFFFF;
+                background: #000000;
+
+                TouchArea {
+                    clicked => { root.start_review() }
+                }
+
+                Text {
+                    text: "START";
+                    color: #FFFFFF;
+                    font-size: 20px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if (root.current_state == AppState.Reviewing) : VerticalLayout {
+            spacing: 30px;
+            alignment: center;
+
+            // Card Front
+            Rectangle {
+                width: 335px;
+                height: 250px;
+                border-width: 2px;
+                border-color: #FFFFFF;
+                background: #000000;
+
+                Text {
+                    text: root.card_front;
+                    color: #FFFFFF;
+                    font-size: 48px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                if (root.is_revealed) : Text {
+                    text: root.card_back;
+                    color: #FFFFFF;
+                    font-size: 24px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                if (!root.is_revealed) : TouchArea {
+                    clicked => { root.reveal_card() }
+                }
+            }
+
+            // Rating Buttons (only if revealed)
+            if (root.is_revealed) : HorizontalLayout {
+                spacing: 10px;
+                alignment: center;
+
+                for i in [0, 1, 2, 3] : Rectangle {
+                    width: 70px;
+                    height: 40px;
+                    border-width: 1px;
+                    border-color: #FFFFFF;
+                    background: #000000;
+
+                    Text {
+                        text: i == 0 ? "Again" : (i == 1 ? "Hard" : (i == 2 ? "Good" : "Easy"));
+                        color: #FFFFFF;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+
+                    TouchArea {
+                        clicked => { root.rate_card(i) }
+                    }
+                }
+            }
+        }
+    }
+}
