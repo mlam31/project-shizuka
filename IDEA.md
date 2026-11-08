@@ -35,10 +35,6 @@ aesthetic is strictly Black & White (High Contrast/E-ink style) to minimize cogn
 - `sentences`: id, text, translation, grammatical_breakdown.
 - `tags`: id, name.
 
-### 3. AI Workflow (The "Content Factory")
-1. **Input:** Raw Japanese text (news, manga, or user input).
-2. **Process:** Local LLM analyzes text $\rightarrow$ Extracts vocabulary $\rightarrow$ Breaks down grammar $\rightarrow$ Generates example sentences.
-3. **Output:** Structured JSON/SQL ready to be ingested by the SQLite database.
 
 ## 🚀 Development Roadmap
 
@@ -53,16 +49,11 @@ aesthetic is strictly Black & White (High Contrast/E-ink style) to minimize cogn
 - [ ] Implement the "Flashcard View" (Front $\rightarrow$ Reveal $\rightarrow$ Rating).
 - [ ] Implement the "Daily Review" loop.
 
-### Phase 3: The AI Engine
-- [ ] Create a Python/Rust script to communicate with Ollama/MLX.
-- [ ] Prompt engineering for "Grammar Decomposition".
-- [ ] Automate the import of generated cards into the SQLite DB.
-
-### Phase 4: Mobile Optimization
+### Phase 3: Mobile Optimization
 - [ ] Explore cross-compilation paths for mobile targets.
 - [ ] Optimize UI for small screens (iPhone 13 mini dimensions).
 
-## 🤖 AI Development Instructions (For Hermes Agent & Qwen 2.5 Coder)
+## 🤖 AI Development Instructions 
 *When generating code, follow these principles:*
 1. **Strict Rust Idioms:** Use `clippy` standards. Favor memory safety and zero-cost abstractions.
 2. **Minimalism:** Every line of UI code must serve a purpose. No decorative elements; only functional typography.
