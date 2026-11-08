@@ -24,7 +24,21 @@ Project Shizuka is a lightweight iOS app (and future modded Kindle app) designed
 - **Phase 2**: Advanced features (progress tracking, customization).
 - **Phase 3**: Testing and optimization for iOS and modded Kindle.
 
-## Getting Started
+## Download (desktop)
+
+Prebuilt versions for trying the app without installing Rust:
+
+- **macOS 11+** (Apple Silicon and Intel): [`dist/Shizuka.dmg`](dist/Shizuka.dmg)
+- **Windows 10/11**: [`dist/Shizuka-windows.zip`](dist/Shizuka-windows.zip)
+
+macOS: drag Shizuka into Applications. On first launch, right-click → **Open**
+(the app isn't notarized). Windows: extract and run `Shizuka.exe`; if
+SmartScreen appears, choose **More info → Run anyway**.
+
+See [`dist/README.md`](dist/README.md) for details.
+
+## Building from source
+
 1. Clone the repository:
    ```sh
    git clone https://github.com/mlam31/project-shizuka.git
@@ -40,6 +54,9 @@ Project Shizuka is a lightweight iOS app (and future modded Kindle app) designed
    ```sh
    cargo run
    ```
+
+For the iPhone app, see [`ios/README.md`](ios/README.md). Desktop installers are
+rebuilt with `scripts/build_macos_dmg.sh` and `scripts/build_windows.sh`.
 
 ## Contributing
 Contributions are welcome! Please fork the repository and create a pull request with your changes.

@@ -1,5 +1,4 @@
 /target/
-/Cargo.lock
 
 # Local app data
 /shizuka.db
@@ -13,3 +12,9 @@
 
 # macOS
 .DS_Store
+
+# Desktop build intermediates: only the distributable DMG/zip is committed.
+/dist/Shizuka.app/
+/dist/dmg-root/
+/dist/*.exe
+

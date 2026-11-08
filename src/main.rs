@@ -1,14 +1,20 @@
+// Hide the console window on Windows release builds.
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
+
 mod core;
 mod db;
 mod ui;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::env;
 use std::path::PathBuf;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 use std::rc::Rc;
 
@@ -95,14 +101,22 @@ fn show_next_card(ui: &AppWindow, db: &Database, deck: &str) -> Result<()> {
 
 /// Directory where exported deck CSVs are written.
 fn export_dir() -> PathBuf {
-    if let Some(home) = env::var_os("HOME") {
-        #[cfg(target_os = "ios")]
-        {
+    #[cfg(target_os = "ios")]
+    {
+        if let Some(home) = env::var_os("HOME") {
             // The app sandbox has no ~/Downloads; Documents is visible in the Files app.
             return PathBuf::from(home).join("Documents").join("Shizuka");
         }
-        #[cfg(not(target_os = "ios"))]
-        {
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(profile) = env::var_os("USERPROFILE") {
+            return PathBuf::from(profile).join("Downloads").join("Shizuka");
+        }
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "windows")))]
+    {
+        if let Some(home) = env::var_os("HOME") {
             return PathBuf::from(home).join("Downloads").join("Shizuka");
         }
     }
@@ -112,12 +126,41 @@ fn export_dir() -> PathBuf {
 /// Default location of the SQLite database.
 ///
 /// On iOS the bundle is read-only, so the database lives in the app's Documents
-/// directory (writable, and accessible through the Files app).
+/// directory (writable, and accessible through the Files app). On Windows it
+/// lives in the user's Documents folder so it survives updates of the exe.
 fn default_db_path() -> PathBuf {
     #[cfg(target_os = "ios")]
     {
         if let Some(home) = env::var_os("HOME") {
             return PathBuf::from(home).join("Documents").join("shizuka.db");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(profile) = env::var_os("USERPROFILE") {
+            return PathBuf::from(profile)
+                .join("Documents")
+                .join("Shizuka")
+                .join("shizuka.db");
+        }
+        if let Some(appdata) = env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("Shizuka").join("shizuka.db");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Keep using a project-local database while developing, but use
+        // Application Support for the packaged .app (whose cwd is `/`).
+        let local = PathBuf::from("shizuka.db");
+        if local.exists() {
+            return local;
+        }
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("Shizuka")
+                .join("shizuka.db");
         }
     }
     PathBuf::from("shizuka.db")
@@ -143,14 +186,61 @@ fn selected_manage_decks(ui: &AppWindow) -> Vec<String> {
     out
 }
 
+/// Per-user writable directory, used when the current directory isn't writable
+/// (for example a .app launched from Finder, whose working directory is `/`).
+fn user_data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = env::var_os("HOME") {
+            return Some(
+                PathBuf::from(home)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("Shizuka"),
+            );
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = env::var_os("APPDATA") {
+            return Some(PathBuf::from(appdata).join("Shizuka"));
+        }
+    }
+    None
+}
+
+/// Opens the database, falling back to the per-user data directory when the
+/// requested path isn't writable.
+fn open_database(path: &str) -> Result<(Database, String)> {
+    match Database::new(path) {
+        Ok(db) => Ok((db, path.to_string())),
+        Err(err) if env::var_os("SHIZUKA_DB").is_none() => {
+            let Some(dir) = user_data_dir() else {
+                return Err(err);
+            };
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("Failed to create {}", dir.display()))?;
+            let fallback = dir.join("shizuka.db").to_string_lossy().into_owned();
+            eprintln!("Could not open {path} ({err:#}); using {fallback}");
+            Ok((Database::new(&fallback)?, fallback))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn main() -> Result<()> {
     let db_path = env::var("SHIZUKA_DB")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_db_path())
         .to_string_lossy()
         .into_owned();
+    if let Some(parent) = PathBuf::from(&db_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let (db, db_path) = open_database(&db_path)?;
     println!("Using database: {}", db_path);
-    let db = Database::new(&db_path)?;
     db.seed_alphabet_decks()?;
 
     // Create the import folder up front so it shows up in the Files app on iOS
@@ -309,8 +399,14 @@ fn main() -> Result<()> {
                 if let Some(first) = paths.first() {
                     let _ = Command::new("open").arg("-R").arg(first).spawn();
                 }
+                #[cfg(target_os = "windows")]
+                if let Some(first) = paths.first() {
+                    let _ = Command::new("explorer").arg("/select,").arg(first).spawn();
+                }
                 let exported_to = if cfg!(target_os = "ios") {
                     "the Shizuka folder in the Files app"
+                } else if cfg!(target_os = "windows") {
+                    "your Downloads\\Shizuka folder"
                 } else {
                     "~/Downloads/Shizuka"
                 };
