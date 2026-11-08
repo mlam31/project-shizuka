@@ -65,6 +65,7 @@ export component AppWindow inherits Window {
     in-out property <string> status_message: "";
     in-out property <string> import_path: "";
     in-out property <string> card_direction: "random";
+    in property <bool> is_mobile: false;
 
     callback open_deck_select();
     callback select_deck(string);
@@ -105,9 +106,11 @@ export component AppWindow inherits Window {
         VerticalLayout {
             width: 100%;
             height: 100%;
-            padding: 24px;
+            padding-left: 24px + root.safe-area-insets.left;
+            padding-right: 24px + root.safe-area-insets.right;
+            padding-top: 24px + root.safe-area-insets.top;
+            padding-bottom: 24px + root.safe-area-insets.bottom;
             spacing: 16px;
-            alignment: start;
 
             // WELCOME
             if (root.current_state == AppState.Welcome) : VerticalLayout {
@@ -133,7 +136,7 @@ export component AppWindow inherits Window {
                 width: 100%;
                 vertical-stretch: 1;
                 spacing: 14px;
-                alignment: start;
+                alignment: center;
                 HorizontalLayout { width: 100%; alignment: center; Text { text: "Choose a deck"; color: #FFFFFF; font-size: 24px; } }
                 if (root.deck_names.length == 0) : HorizontalLayout {
                     width: 100%; vertical-stretch: 1; alignment: center;
@@ -229,13 +232,26 @@ export component AppWindow inherits Window {
                         width: min(360px, root.width - 48px);
                         spacing: 8px;
                         Text { text: "Import CSV (front,back)"; color: #888888; font-size: 12px; }
-                        LineEdit { placeholder-text: "/path/to/deck.csv"; text <=> root.import_path; }
-                        HorizontalLayout {
-                            spacing: 10px;
-                            ActionButton { label: "Import path"; clicked => { root.import_path_deck(root.import_path); } }
+                        if (!root.is_mobile) : VerticalLayout {
+                            spacing: 8px;
+                            LineEdit { placeholder-text: "/path/to/deck.csv"; text <=> root.import_path; }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                ActionButton { label: "Import path"; clicked => { root.import_path_deck(root.import_path); } }
+                                ActionButton { label: "Import folder"; clicked => { root.import_folder(); } }
+                            }
+                            Text { text: "Import folder: <db dir>/import/*.csv"; color: #666666; font-size: 11px; wrap: word-wrap; }
+                        }
+                        if (root.is_mobile) : VerticalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: "Put .csv files in the import folder, then tap Import folder.\n\nFiles app → On My iPhone → Shizuka → import";
+                                color: #888888;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
                             ActionButton { label: "Import folder"; clicked => { root.import_folder(); } }
                         }
-                        Text { text: "Import folder: <db dir>/import/*.csv"; color: #666666; font-size: 11px; wrap: word-wrap; }
                     }
                 }
 
@@ -316,7 +332,6 @@ export component AppWindow inherits Window {
                 width: 100%;
                 vertical-stretch: 1;
                 spacing: 14px;
-                alignment: start;
 
                 HorizontalLayout {
                     width: 100%;

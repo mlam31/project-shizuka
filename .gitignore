@@ -1,2 +1,15 @@
 /target/
 /Cargo.lock
+
+# Local app data
+/shizuka.db
+/import/
+/exports/
+
+# Xcode / XcodeGen generated files
+/ios/Shizuka.xcodeproj/
+/ios/Info.plist
+/ios/build/
+
+# macOS
+.DS_Store

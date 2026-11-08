@@ -8,6 +8,7 @@ use rand::Rng;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::env;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::rc::Rc;
 
@@ -92,12 +93,34 @@ fn show_next_card(ui: &AppWindow, db: &Database, deck: &str) -> Result<()> {
     Ok(())
 }
 
+/// Directory where exported deck CSVs are written.
 fn export_dir() -> PathBuf {
     if let Some(home) = env::var_os("HOME") {
-        PathBuf::from(home).join("Downloads").join("Shizuka")
-    } else {
-        PathBuf::from("exports")
+        #[cfg(target_os = "ios")]
+        {
+            // The app sandbox has no ~/Downloads; Documents is visible in the Files app.
+            return PathBuf::from(home).join("Documents").join("Shizuka");
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            return PathBuf::from(home).join("Downloads").join("Shizuka");
+        }
     }
+    PathBuf::from("exports")
+}
+
+/// Default location of the SQLite database.
+///
+/// On iOS the bundle is read-only, so the database lives in the app's Documents
+/// directory (writable, and accessible through the Files app).
+fn default_db_path() -> PathBuf {
+    #[cfg(target_os = "ios")]
+    {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home).join("Documents").join("shizuka.db");
+        }
+    }
+    PathBuf::from("shizuka.db")
 }
 
 fn import_dir(db_path: &str) -> PathBuf {
@@ -121,12 +144,25 @@ fn selected_manage_decks(ui: &AppWindow) -> Vec<String> {
 }
 
 fn main() -> Result<()> {
-    let db_path = env::var("SHIZUKA_DB").unwrap_or_else(|_| "shizuka.db".to_string());
+    let db_path = env::var("SHIZUKA_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_db_path())
+        .to_string_lossy()
+        .into_owned();
     println!("Using database: {}", db_path);
     let db = Database::new(&db_path)?;
     db.seed_alphabet_decks()?;
 
+    // Create the import folder up front so it shows up in the Files app on iOS
+    // (and is ready for imports on desktop).
+    let import_path = import_dir(&db_path);
+    if let Err(err) = std::fs::create_dir_all(&import_path) {
+        eprintln!("Failed to create import folder {}: {err}", import_path.display());
+    }
+
     let ui = AppWindow::new()?;
+    #[cfg(target_os = "ios")]
+    ui.set_is_mobile(true);
     let direction = db
         .get_setting("card_direction")?
         .unwrap_or_else(|| "random".to_string());
@@ -269,10 +305,18 @@ fn main() -> Result<()> {
                         }
                     }
                 }
+                #[cfg(target_os = "macos")]
                 if let Some(first) = paths.first() {
                     let _ = Command::new("open").arg("-R").arg(first).spawn();
                 }
-                ui.set_status_message(format!("Exported {} deck(s) to ~/Downloads/Shizuka.", paths.len()).into());
+                let exported_to = if cfg!(target_os = "ios") {
+                    "the Shizuka folder in the Files app"
+                } else {
+                    "~/Downloads/Shizuka"
+                };
+                ui.set_status_message(
+                    format!("Exported {} deck(s) to {}.", paths.len(), exported_to).into(),
+                );
             }
         }
     });
