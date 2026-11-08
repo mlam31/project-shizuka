@@ -3,47 +3,168 @@ mod db;
 mod ui;
 
 use anyhow::Result;
-use slint::ComponentHandle;
-use crate::ui::{AppWindow, AppState};
+use rand::seq::SliceRandom;
+use rand::Rng;
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use std::env;
+use std::path::PathBuf;
+use std::process::Command;
+use std::rc::Rc;
+
+use crate::core::{calculate_next_review, ReviewResult};
 use crate::db::Database;
-use crate::core::Card;
+use crate::ui::{AppState, AppWindow, ManageDeck};
+
+fn rating_to_result(rating: i32) -> ReviewResult {
+    match rating {
+        0 => ReviewResult::Again, // Bad
+        1 => ReviewResult::Hard,  // OK
+        2 => ReviewResult::Good,  // Good
+        _ => ReviewResult::Easy,  // Very good
+    }
+}
+
+fn refresh_deck_lists(ui: &AppWindow, db: &Database) {
+    let visible = db.list_decks().unwrap_or_default();
+    let all = db.list_all_decks().unwrap_or_default();
+
+    ui.set_deck_names(ModelRc::new(VecModel::from(
+        visible.into_iter().map(|s| s.into()).collect::<Vec<slint::SharedString>>(),
+    )));
+
+    let manage: Vec<ManageDeck> = all
+        .into_iter()
+        .map(|name| {
+            let hidden = db.is_deck_hidden(&name).unwrap_or(false);
+            ManageDeck {
+                name: name.into(),
+                selected: false,
+                hidden,
+            }
+        })
+        .collect();
+    ui.set_manage_decks(ModelRc::new(VecModel::from(manage)));
+}
+
+fn show_next_card(ui: &AppWindow, db: &Database, deck: &str) -> Result<()> {
+    match db.get_all_cards(deck) {
+        Ok(cards) if !cards.is_empty() => {
+            let mut rng = rand::thread_rng();
+            let current_id = ui.get_current_card_id() as i64;
+            let choices: Vec<_> = if cards.len() > 1 {
+                cards.iter().filter(|c| c.id != current_id).collect()
+            } else {
+                cards.iter().collect()
+            };
+            let card = (*choices.choose(&mut rng).unwrap()).clone();
+
+            let direction = ui.get_card_direction().to_string();
+            let reverse = match direction.as_str() {
+                "character" => false,
+                "pronunciation" => true,
+                _ => rng.gen_bool(0.5),
+            };
+            let (prompt, answer) = if reverse {
+                (card.back.clone(), card.front.clone())
+            } else {
+                (card.front.clone(), card.back.clone())
+            };
+
+            ui.set_selected_deck(deck.into());
+            ui.set_current_card_id(card.id as i32);
+            ui.set_card_front(prompt.into());
+            ui.set_card_back(answer.into());
+            ui.set_is_revealed(false);
+            ui.set_current_state(AppState::Reviewing);
+        }
+        Ok(_) => {
+            ui.set_current_card_id(0);
+            ui.set_card_front("No cards".into());
+            ui.set_card_back("This deck is empty. Tap Decks to choose another.".into());
+            ui.set_is_revealed(true);
+            ui.set_selected_deck(deck.into());
+            ui.set_current_state(AppState::Reviewing);
+        }
+        Err(err) => {
+            eprintln!("Failed to load deck {}: {err}", deck);
+        }
+    }
+    Ok(())
+}
+
+fn export_dir() -> PathBuf {
+    if let Some(home) = env::var_os("HOME") {
+        PathBuf::from(home).join("Downloads").join("Shizuka")
+    } else {
+        PathBuf::from("exports")
+    }
+}
+
+fn import_dir(db_path: &str) -> PathBuf {
+    let p = PathBuf::from(db_path);
+    p.parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("import")
+}
+
+fn selected_manage_decks(ui: &AppWindow) -> Vec<String> {
+    let model = ui.get_manage_decks();
+    let mut out = Vec::new();
+    for i in 0..model.row_count() {
+        if let Some(row) = model.row_data(i) {
+            if row.selected {
+                out.push(row.name.to_string());
+            }
+        }
+    }
+    out
+}
 
 fn main() -> Result<()> {
-    // 1. Initialize the database
-    let db_path = "shizuka.db";
-    let db = Database::new(db_path)?;
+    let db_path = env::var("SHIZUKA_DB").unwrap_or_else(|_| "shizuka.db".to_string());
+    println!("Using database: {}", db_path);
+    let db = Database::new(&db_path)?;
+    db.seed_alphabet_decks()?;
 
-    // 2. Seed the database if it's empty
-    let existing_cards = db.get_due_cards("Fundamentals")?;
-    if existing_cards.is_empty() {
-        println!("Seeding starter deck...");
-        db.seed_starter_deck()?;
-    }
-
-    // 3. Create the UI
     let ui = AppWindow::new()?;
+    let direction = db
+        .get_setting("card_direction")?
+        .unwrap_or_else(|| "random".to_string());
+    ui.set_card_direction(direction.into());
+    refresh_deck_lists(&ui, &db);
+    let db_ref = Rc::new(db);
 
-    // 4. Set up the logic (Simplified for now to get it running)
-    // We use the handle directly within the closure to avoid the clone error.
-
-    let ui_handle = ui.as_weak();
-    let db_ref = std::sync::Arc::new(db);
-
-    ui.on_start_review({
+    ui.on_open_deck_select({
         let ui_handle = ui.as_weak();
         let db_ref = db_ref.clone();
         move || {
             if let Some(ui) = ui_handle.upgrade() {
-                ui.set_current_state(AppState::Reviewing);
-                ui.set_is_revealed(false);
+                ui.set_status_message("".into());
+                refresh_deck_lists(&ui, db_ref.as_ref());
+                ui.set_current_state(AppState::DeckSelect);
+            }
+        }
+    });
 
-                if let Ok(cards) = db_ref.get_due_cards("Fundamentals") {
-                    if !cards.is_empty() {
-                        let card = cards[0].clone();
-                        ui.set_card_front(card.front.clone().into());
-                        ui.set_card_back(card.back.clone().into());
-                    }
-                }
+    ui.on_change_deck({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_status_message("".into());
+                refresh_deck_lists(&ui, db_ref.as_ref());
+                ui.set_current_state(AppState::DeckSelect);
+            }
+        }
+    });
+
+    ui.on_select_deck({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move |deck| {
+            if let Some(ui) = ui_handle.upgrade() {
+                let deck = deck.to_string();
+                let _ = show_next_card(&ui, db_ref.as_ref(), &deck);
             }
         }
     });
@@ -62,10 +183,177 @@ fn main() -> Result<()> {
         let db_ref = db_ref.clone();
         move |rating| {
             if let Some(ui) = ui_handle.upgrade() {
-                // For now, we'll just print the rating and reset to welcome
-                // to prove the UI interaction works.
-                println!("Rated card: {}", rating);
-                ui.set_current_state(AppState::Welcome);
+                let deck = ui.get_selected_deck().to_string();
+                let card_id = ui.get_current_card_id() as i64;
+                if card_id > 0 {
+                    if let Ok(card) = db_ref.get_card(card_id) {
+                        let mut state = card.state;
+                        calculate_next_review(&mut state, rating_to_result(rating));
+                        if let Err(err) = db_ref.update_card(card_id, &state) {
+                            eprintln!("Failed to update card {}: {err}", card_id);
+                        }
+                    }
+                }
+                let _ = show_next_card(&ui, db_ref.as_ref(), &deck);
+            }
+        }
+    });
+
+    ui.on_open_settings({
+        let ui_handle = ui.as_weak();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_status_message("".into());
+                ui.set_current_state(AppState::Settings);
+            }
+        }
+    });
+
+    ui.on_set_card_direction({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move |mode| {
+            if let Some(ui) = ui_handle.upgrade() {
+                let mode = mode.to_string();
+                let _ = db_ref.set_setting("card_direction", &mode);
+                ui.set_card_direction(mode.into());
+                ui.set_status_message("Saved.".into());
+            }
+        }
+    });
+
+    ui.on_open_manage({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                ui.set_status_message("".into());
+                refresh_deck_lists(&ui, db_ref.as_ref());
+                ui.set_current_state(AppState::ManageDecks);
+            }
+        }
+    });
+
+    ui.on_toggle_manage_deck({
+        let ui_handle = ui.as_weak();
+        move |idx| {
+            if let Some(ui) = ui_handle.upgrade() {
+                let model = ui.get_manage_decks();
+                let count = model.row_count();
+                let mut rows: Vec<ManageDeck> = (0..count).filter_map(|i| model.row_data(i)).collect();
+                if let Some(row) = rows.get_mut(idx as usize) {
+                    row.selected = !row.selected;
+                }
+                ui.set_manage_decks(ModelRc::new(VecModel::from(rows)));
+            }
+        }
+    });
+
+    ui.on_bulk_export({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let selected = selected_manage_decks(&ui);
+                if selected.is_empty() {
+                    ui.set_status_message("Select one or more decks to export.".into());
+                    return;
+                }
+                let mut paths = Vec::new();
+                for deck in &selected {
+                    match db_ref.export_deck_csv(deck, &export_dir()) {
+                        Ok(path) => paths.push(path),
+                        Err(err) => {
+                            ui.set_status_message(format!("Export failed ({}): {err}", deck).into());
+                            return;
+                        }
+                    }
+                }
+                if let Some(first) = paths.first() {
+                    let _ = Command::new("open").arg("-R").arg(first).spawn();
+                }
+                ui.set_status_message(format!("Exported {} deck(s) to ~/Downloads/Shizuka.", paths.len()).into());
+            }
+        }
+    });
+
+    ui.on_bulk_hide({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let selected = selected_manage_decks(&ui);
+                if selected.is_empty() {
+                    ui.set_status_message("Select one or more decks to hide.".into());
+                    return;
+                }
+                for deck in &selected {
+                    let _ = db_ref.set_deck_hidden(deck, true);
+                }
+                refresh_deck_lists(&ui, db_ref.as_ref());
+                ui.set_status_message(format!("Hidden {} deck(s).", selected.len()).into());
+            }
+        }
+    });
+
+    ui.on_bulk_unhide({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let selected = selected_manage_decks(&ui);
+                if selected.is_empty() {
+                    ui.set_status_message("Select one or more decks to show.".into());
+                    return;
+                }
+                for deck in &selected {
+                    let _ = db_ref.set_deck_hidden(deck, false);
+                }
+                refresh_deck_lists(&ui, db_ref.as_ref());
+                ui.set_status_message(format!("Shown {} deck(s).", selected.len()).into());
+            }
+        }
+    });
+
+    ui.on_import_path_deck({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        move |path| {
+            if let Some(ui) = ui_handle.upgrade() {
+                let path = path.to_string();
+                match db_ref.import_deck_csv(std::path::Path::new(&path), None) {
+                    Ok((name, n)) => {
+                        refresh_deck_lists(&ui, db_ref.as_ref());
+                        ui.set_status_message(format!("Imported {} ({} cards).", name, n).into());
+                    }
+                    Err(err) => ui.set_status_message(format!("Import failed: {err}").into()),
+                }
+            }
+        }
+    });
+
+    ui.on_import_folder({
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        let db_path = db_path.clone();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                let dir = import_dir(&db_path);
+                match db_ref.import_decks_from_dir(&dir) {
+                    Ok(results) if results.is_empty() => {
+                        ui.set_status_message(format!("No .csv files in {}", dir.display()).into());
+                    }
+                    Ok(results) => {
+                        refresh_deck_lists(&ui, db_ref.as_ref());
+                        let msg = results
+                            .iter()
+                            .map(|(n, c)| format!("{} ({})", n, c))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        ui.set_status_message(format!("Imported: {}", msg).into());
+                    }
+                    Err(err) => ui.set_status_message(format!("Import failed: {err}").into()),
+                }
             }
         }
     });

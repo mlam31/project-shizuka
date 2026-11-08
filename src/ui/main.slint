@@ -1,127 +1,379 @@
+import { LineEdit } from "std-widgets.slint";
+
 export enum AppState {
     Welcome,
+    DeckSelect,
     Reviewing,
+    Settings,
+    ManageDecks,
+}
+
+export struct ManageDeck {
+    name: string,
+    selected: bool,
+    hidden: bool,
+}
+
+component ActionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked;
+    height: 44px;
+    min-width: 120px;
+    border-width: primary ? 2px : 1px;
+    border-color: primary ? #FFFFFF : #888888;
+    background: #000000;
+    horizontal-stretch: 1;
+    TouchArea { clicked => { root.clicked(); } }
+    Text {
+        text: root.label;
+        color: primary ? #FFFFFF : #BBBBBB;
+        font-size: 15px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component SmallButton inherits Rectangle {
+    in property <string> label;
+    callback clicked;
+    width: 72px;
+    height: 34px;
+    border-width: 1px;
+    border-color: #888888;
+    background: #000000;
+    TouchArea { clicked => { root.clicked(); } }
+    Text { text: root.label; color: #BBBBBB; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
 }
 
 export component AppWindow inherits Window {
-    width: 375px;
-    height: 812px;
     title: "Shizuka";
-    background: #000000; // Pure black for OLED
+    background: #000000;
+    preferred-width: 420px;
+    preferred-height: 760px;
+    min-width: 360px;
+    min-height: 600px;
 
-    // Properties for Rust to set
-    // Note: Slint properties are accessible via setter methods in Rust
     in-out property <string> card_front: "";
     in-out property <string> card_back: "";
     in-out property <AppState> current_state: AppState.Welcome;
     in-out property <bool> is_revealed: false;
+    in-out property <string> selected_deck: "";
+    in-out property <int> current_card_id: 0;
+    in-out property <[string]> deck_names: [];
+    in-out property <[ManageDeck]> manage_decks: [];
+    in-out property <string> status_message: "";
+    in-out property <string> import_path: "";
+    in-out property <string> card_direction: "random";
 
-    // Callbacks for UI to trigger
-    callback start_review();
+    callback open_deck_select();
+    callback select_deck(string);
+    callback change_deck();
     callback reveal_card();
     callback rate_card(int);
+    callback open_settings();
+    callback open_manage();
+    callback set_card_direction(string);
+    callback toggle_manage_deck(int);
+    callback bulk_export();
+    callback bulk_hide();
+    callback bulk_unhide();
+    callback import_path_deck(string);
+    callback import_folder();
 
-    VerticalLayout {
-        padding: 20px;
-        spacing: 20px;
-        alignment: center;
-
-        if (root.current_state == AppState.Welcome) : VerticalLayout {
-            spacing: 30px;
-            alignment: center;
-
-            Text {
-                text: "SHIZUKA";
-                color: #FFFFFF;
-                font-size: 32px;
-                horizontal-alignment: center;
+    // Keyboard shortcuts (Mac): 1-4 rate, Space reveal
+    forward-focus: key-handler;
+    key-handler := FocusScope {
+        x: 0; y: 0;
+        width: 100%;
+        height: 100%;
+        key-pressed(event) => {
+            if (root.current_state != AppState.Reviewing) { return reject; }
+            if (event.text == " " && !root.is_revealed) {
+                root.reveal_card();
+                return accept;
             }
-
-            Text {
-                text: "Ready to learn?";
-                color: #888888;
-                font-size: 18px;
-                horizontal-alignment: center;
+            if (root.is_revealed) {
+                if (event.text == "1") { root.rate_card(0); return accept; }
+                if (event.text == "2") { root.rate_card(1); return accept; }
+                if (event.text == "3") { root.rate_card(2); return accept; }
+                if (event.text == "4") { root.rate_card(3); return accept; }
             }
-
-            Rectangle {
-                width: 200px;
-                height: 50px;
-                border-width: 2px;
-                border-color: #FFFFFF;
-                background: #000000;
-
-                TouchArea {
-                    clicked => { root.start_review() }
-                }
-
-                Text {
-                    text: "START";
-                    color: #FFFFFF;
-                    font-size: 20px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
+            return reject;
         }
 
-        if (root.current_state == AppState.Reviewing) : VerticalLayout {
-            spacing: 30px;
-            alignment: center;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            padding: 24px;
+            spacing: 16px;
+            alignment: start;
 
-            // Card Front
-            Rectangle {
-                width: 335px;
-                height: 250px;
-                border-width: 2px;
-                border-color: #FFFFFF;
-                background: #000000;
-
-                Text {
-                    text: root.card_front;
-                    color: #FFFFFF;
-                    font-size: 48px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                if (root.is_revealed) : Text {
-                    text: root.card_back;
-                    color: #FFFFFF;
-                    font-size: 24px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-
-                if (!root.is_revealed) : TouchArea {
-                    clicked => { root.reveal_card() }
+            // WELCOME
+            if (root.current_state == AppState.Welcome) : VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                spacing: 20px;
+                HorizontalLayout { alignment: center; Text { text: "SHIZUKA"; color: #FFFFFF; font-size: 34px; } }
+                HorizontalLayout { alignment: center; Text { text: "Japanese flashcards"; color: #888888; font-size: 16px; } }
+                Rectangle { height: 12px; }
+                HorizontalLayout {
+                    alignment: center;
+                    VerticalLayout {
+                        width: min(320px, root.width - 48px);
+                        spacing: 12px;
+                        ActionButton { label: "Study"; primary: true; clicked => { root.open_deck_select(); } }
+                        ActionButton { label: "Settings"; clicked => { root.open_settings(); } }
+                    }
                 }
             }
 
-            // Rating Buttons (only if revealed)
-            if (root.is_revealed) : HorizontalLayout {
-                spacing: 10px;
-                alignment: center;
-
-                for i in [0, 1, 2, 3] : Rectangle {
-                    width: 70px;
-                    height: 40px;
-                    border-width: 1px;
-                    border-color: #FFFFFF;
-                    background: #000000;
-
-                    Text {
-                        text: i == 0 ? "Again" : (i == 1 ? "Hard" : (i == 2 ? "Good" : "Easy"));
-                        color: #FFFFFF;
-                        font-size: 14px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-
-                    TouchArea {
-                        clicked => { root.rate_card(i) }
+            // DECK SELECT
+            if (root.current_state == AppState.DeckSelect) : VerticalLayout {
+                width: 100%;
+                vertical-stretch: 1;
+                spacing: 14px;
+                alignment: start;
+                HorizontalLayout { width: 100%; alignment: center; Text { text: "Choose a deck"; color: #FFFFFF; font-size: 24px; } }
+                if (root.deck_names.length == 0) : HorizontalLayout {
+                    width: 100%; vertical-stretch: 1; alignment: center;
+                    Text { text: "No visible decks.\nOpen Settings > Manage decks."; color: #888888; font-size: 14px; horizontal-alignment: center; }
+                }
+                if (root.deck_names.length > 0) : VerticalLayout {
+                    width: 100%;
+                    vertical-stretch: 1;
+                    alignment: start;
+                    spacing: 10px;
+                    for deck in root.deck_names : HorizontalLayout {
+                        width: 100%;
+                        alignment: center;
+                        Rectangle {
+                            width: min(360px, root.width - 48px);
+                            height: 46px;
+                            border-width: 1px; border-color: #FFFFFF; background: #000000;
+                            TouchArea { clicked => { root.select_deck(deck); } }
+                            Text { text: deck; color: #FFFFFF; font-size: 16px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
                     }
                 }
+                if (root.status_message != "") : HorizontalLayout {
+                    width: 100%; alignment: center;
+                    Text { width: min(360px, root.width - 48px); text: root.status_message; color: #888888; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+                }
+                HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    HorizontalLayout {
+                        width: min(360px, root.width - 48px);
+                        spacing: 12px;
+                        ActionButton { label: "Back"; clicked => { root.current_state = AppState.Welcome; } }
+                        ActionButton { label: "Settings"; clicked => { root.open_settings(); } }
+                    }
+                }
+            }
+
+            // SETTINGS (contains Manage)
+            if (root.current_state == AppState.Settings) : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: 14px;
+                HorizontalLayout { alignment: center; Text { text: "Settings"; color: #FFFFFF; font-size: 24px; } }
+
+                HorizontalLayout {
+                    alignment: center;
+                    VerticalLayout {
+                        width: min(360px, root.width - 48px);
+                        spacing: 10px;
+                        Text { text: "Card direction"; color: #888888; font-size: 13px; }
+                        for mode in ["character", "pronunciation", "random"] : Rectangle {
+                            height: 44px;
+                            border-width: root.card_direction == mode ? 2px : 1px;
+                            border-color: root.card_direction == mode ? #FFFFFF : #666666;
+                            background: #000000;
+                            TouchArea { clicked => { root.set_card_direction(mode); } }
+                            Text {
+                                text: mode == "character" ? "Character first" : (mode == "pronunciation" ? "Pronunciation first" : "Random");
+                                color: #FFFFFF; font-size: 15px; horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+                        Rectangle { height: 6px; }
+                        ActionButton { label: "Manage decks (export/import/hide)"; clicked => { root.open_manage(); } }
+                    }
+                }
+
+                if (root.status_message != "") : HorizontalLayout {
+                    alignment: center;
+                    Text { text: root.status_message; color: #888888; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    alignment: center;
+                    HorizontalLayout {
+                        width: min(360px, root.width - 48px);
+                        ActionButton { label: "Back"; clicked => { root.open_deck_select(); } }
+                    }
+                }
+            }
+
+            // MANAGE DECKS (under Settings)
+            if (root.current_state == AppState.ManageDecks) : VerticalLayout {
+                width: 100%;
+                vertical-stretch: 1;
+                spacing: 10px;
+                alignment: start;
+                HorizontalLayout { width: 100%; alignment: center; Text { text: "Manage decks"; color: #FFFFFF; font-size: 22px; } }
+
+                HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    VerticalLayout {
+                        width: min(360px, root.width - 48px);
+                        spacing: 8px;
+                        Text { text: "Import CSV (front,back)"; color: #888888; font-size: 12px; }
+                        LineEdit { placeholder-text: "/path/to/deck.csv"; text <=> root.import_path; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            ActionButton { label: "Import path"; clicked => { root.import_path_deck(root.import_path); } }
+                            ActionButton { label: "Import folder"; clicked => { root.import_folder(); } }
+                        }
+                        Text { text: "Import folder: <db dir>/import/*.csv"; color: #666666; font-size: 11px; wrap: word-wrap; }
+                    }
+                }
+
+                HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    VerticalLayout {
+                        width: min(360px, root.width - 48px);
+                        spacing: 6px;
+                        vertical-stretch: 1;
+                        Text { text: "Select decks, then export/hide/show"; color: #888888; font-size: 12px; }
+                        for deck[idx] in root.manage_decks : Rectangle {
+                            height: 38px;
+                            border-width: deck.selected ? 3px : 1px;
+                            border-color: deck.selected ? #FFFFFF : #555555;
+                            background: #000000;
+                            TouchArea { clicked => { root.toggle_manage_deck(idx); } }
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                Text {
+                                    text: deck.hidden ? deck.name + " (hidden)" : deck.name;
+                                    color: deck.hidden ? #777777 : #FFFFFF;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                if (deck.selected) : Text { text: "✓"; color: #FFFFFF; font-size: 13px; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    HorizontalLayout {
+                        width: min(360px, root.width - 48px);
+                        spacing: 8px;
+                        Rectangle {
+                            horizontal-stretch: 1; height: 44px;
+                            border-width: 1px; border-color: #888888; background: #000000;
+                            TouchArea { clicked => { root.bulk_export(); } }
+                            Text { text: "Export"; color: #BBBBBB; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1; height: 44px;
+                            border-width: 1px; border-color: #888888; background: #000000;
+                            TouchArea { clicked => { root.bulk_hide(); } }
+                            Text { text: "Hide"; color: #BBBBBB; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1; height: 44px;
+                            border-width: 1px; border-color: #888888; background: #000000;
+                            TouchArea { clicked => { root.bulk_unhide(); } }
+                            Text { text: "Show"; color: #BBBBBB; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                if (root.status_message != "") : HorizontalLayout {
+                    width: 100%; alignment: center;
+                    Text { width: min(360px, root.width - 48px); text: root.status_message; color: #888888; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+                }
+                HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    HorizontalLayout {
+                        width: min(360px, root.width - 48px);
+                        ActionButton { label: "Back to Settings"; clicked => { root.open_settings(); } }
+                    }
+                }
+            }
+
+            // REVIEWING
+            if (root.current_state == AppState.Reviewing) : VerticalLayout {
+                width: 100%;
+                vertical-stretch: 1;
+                spacing: 14px;
+                alignment: start;
+
+                HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    HorizontalLayout {
+                        width: min(360px, root.width - 48px);
+                        alignment: space-between;
+                        SmallButton { label: "Decks"; clicked => { root.change_deck(); } }
+                        Text { text: root.selected_deck; color: #888888; font-size: 13px; vertical-alignment: center; }
+                    }
+                }
+
+                HorizontalLayout {
+                    width: 100%;
+                    vertical-stretch: 1;
+                    alignment: center;
+                    Rectangle {
+                        width: min(360px, root.width - 48px);
+                        height: 100%;
+                        min-height: 180px;
+                        max-height: 340px;
+                        border-width: 2px; border-color: #FFFFFF; background: #000000;
+                        VerticalLayout {
+                            alignment: center;
+                            padding: 16px;
+                            spacing: 14px;
+                            Text { text: root.card_front; color: #FFFFFF; font-size: 46px; horizontal-alignment: center; wrap: word-wrap; }
+                            if (root.is_revealed) : Text { text: root.card_back; color: #FFFFFF; font-size: 22px; horizontal-alignment: center; wrap: word-wrap; }
+                            if (!root.is_revealed) : Text { text: "Space / tap to reveal"; color: #555555; font-size: 12px; horizontal-alignment: center; }
+                        }
+                        if (!root.is_revealed) : TouchArea { clicked => { root.reveal_card(); } }
+                    }
+                }
+
+                if (root.is_revealed) : HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    HorizontalLayout {
+                        width: min(360px, root.width - 48px);
+                        spacing: 8px;
+                        for i in [0, 1, 2, 3] : Rectangle {
+                            horizontal-stretch: 1;
+                            height: 46px;
+                            border-width: 1px; border-color: #FFFFFF; background: #000000;
+                            TouchArea { clicked => { root.rate_card(i); } }
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: i == 0 ? "Bad" : (i == 1 ? "OK" : (i == 2 ? "Good" : "Very good"));
+                                    color: #FFFFFF; font-size: 13px; horizontal-alignment: center;
+                                }
+                                Text { text: i == 0 ? "1" : (i == 1 ? "2" : (i == 2 ? "3" : "4")); color: #666666; font-size: 10px; horizontal-alignment: center; }
+                            }
+                        }
+                    }
+                }
+                if (!root.is_revealed) : HorizontalLayout { width: 100%; height: 46px; }
             }
         }
     }
