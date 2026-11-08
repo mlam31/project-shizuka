@@ -13,6 +13,10 @@
 # macOS
 .DS_Store
 
+# AI assistant logs and caches
+.aider*
+
+
 # Desktop build intermediates: only the distributable DMG/zip is committed.
 /dist/Shizuka.app/
 /dist/dmg-root/
