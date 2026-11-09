@@ -6,6 +6,7 @@ Project Shizuka is a lightweight iOS app (and future modded Kindle app) designed
 ## Features
 - **Flashcards**: Create and manage flashcards for vocabulary, grammar, and other Japanese language elements.
 - **Review System**: Implement a spaced repetition system to optimize learning.
+- **Daily Streak**: Study for at least 15 minutes a day to keep and grow your streak; progress is shown on the home screen.
 - **Progress Tracking**: Track user progress and provide insights into areas that need improvement.
 - **Customization**: Allow users to customize their learning experience with themes, study schedules, and more.
 

@@ -1,5 +1,46 @@
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, NaiveDate, Utc, Duration};
 use serde::{Deserialize, Serialize};
+
+/// Daily study goal (15 minutes) that keeps a streak alive.
+pub const DAILY_GOAL_SECONDS: u64 = 15 * 60;
+
+/// Consecutive days on which the daily study goal was reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Streak {
+    /// Number of consecutive qualified days.
+    pub days: u32,
+    /// Most recent day on which the goal was reached.
+    pub last_qualified_day: Option<NaiveDate>,
+}
+
+impl Streak {
+    /// Returns the streak as shown to the user.
+    ///
+    /// A streak stays alive when the last qualified day is today or yesterday;
+    /// missing a full day breaks it.
+    pub fn display_days(&self, today: NaiveDate) -> u32 {
+        match self.last_qualified_day {
+            Some(day) if day == today || day == today - Duration::days(1) => self.days,
+            _ => 0,
+        }
+    }
+
+    /// Marks `today` as qualified exactly once.
+    ///
+    /// Consecutive days extend the streak; any gap restarts it at one.
+    /// Returns `true` when the stored streak changed.
+    pub fn qualify(&mut self, today: NaiveDate) -> bool {
+        if self.last_qualified_day == Some(today) {
+            return false;
+        }
+        self.days = match self.last_qualified_day {
+            Some(day) if day == today - Duration::days(1) => self.days.saturating_add(1),
+            _ => 1,
+        };
+        self.last_qualified_day = Some(today);
+        true
+    }
+}
 
 /// Represents the user's response to a flashcard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,5 +176,40 @@ mod tests {
         calculate_next_review(&mut state, ReviewResult::Good);
         assert_eq!(state.repetitions, 2);
         assert_eq!(state.interval, 6);
+    }
+
+    #[test]
+    fn test_streak_extends_on_consecutive_days() {
+        let day = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let mut streak = Streak::default();
+
+        assert_eq!(streak.display_days(day), 0);
+        assert!(streak.qualify(day));
+        assert_eq!(streak.days, 1);
+
+        // Qualifying twice on the same day must not double-count.
+        assert!(!streak.qualify(day));
+        assert_eq!(streak.days, 1);
+
+        assert!(streak.qualify(day + Duration::days(1)));
+        assert_eq!(streak.days, 2);
+
+        // The streak is still shown the day after the last qualified day.
+        assert_eq!(streak.display_days(day + Duration::days(2)), 2);
+        // ...but it is gone after a full missed day.
+        assert_eq!(streak.display_days(day + Duration::days(3)), 0);
+    }
+
+    #[test]
+    fn test_streak_resets_after_gap() {
+        let day = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let mut streak = Streak {
+            days: 7,
+            last_qualified_day: Some(day),
+        };
+
+        assert!(streak.qualify(day + Duration::days(2)));
+        assert_eq!(streak.days, 1);
+        assert_eq!(streak.last_qualified_day, Some(day + Duration::days(2)));
     }
 }

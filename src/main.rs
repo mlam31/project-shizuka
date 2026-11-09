@@ -9,18 +9,25 @@ mod db;
 mod ui;
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
+use std::cell::Cell;
 use std::env;
 use std::path::PathBuf;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 use std::rc::Rc;
+use std::time::Instant;
 
-use crate::core::{calculate_next_review, ReviewResult};
+use crate::core::{calculate_next_review, ReviewResult, Streak, DAILY_GOAL_SECONDS};
 use crate::db::Database;
 use crate::ui::{AppState, AppWindow, ManageDeck};
+
+/// Longest stretch counted from a single card, so an idle app cannot farm
+/// study time (and a streak) by simply being left open.
+const MAX_CARD_SECONDS: u64 = 120;
 
 fn rating_to_result(rating: i32) -> ReviewResult {
     match rating {
@@ -53,7 +60,72 @@ fn refresh_deck_lists(ui: &AppWindow, db: &Database) {
     ui.set_manage_decks(ModelRc::new(VecModel::from(manage)));
 }
 
-fn show_next_card(ui: &AppWindow, db: &Database, deck: &str) -> Result<()> {
+/// Updates the stored streak for the current local day.
+///
+/// Returns the streak and today's exercise seconds.
+fn sync_streak(db: &Database) -> (Streak, u64) {
+    let today = Local::now().date_naive();
+    let day_key = today.format("%Y-%m-%d").to_string();
+    let today_seconds = db.study_seconds(&day_key).unwrap_or(0);
+
+    let mut streak = db.load_streak().unwrap_or_default();
+    if today_seconds >= DAILY_GOAL_SECONDS && streak.qualify(today) {
+        if let Err(err) = db.save_streak(&streak) {
+            eprintln!("Failed to save streak: {err}");
+        }
+    }
+    (streak, today_seconds)
+}
+
+/// Refreshes the home-menu streak and today's exercise progress.
+///
+/// Qualifying days are stored once the 15-minute goal is reached, so the
+/// streak advances even if the app is closed and reopened later that day.
+fn refresh_streak(ui: &AppWindow, db: &Database) {
+    let today = Local::now().date_naive();
+    let (streak, today_seconds) = sync_streak(db);
+
+    let days = streak.display_days(today);
+    let streak_text = match days {
+        0 => "No streak yet".to_string(),
+        1 => "1-day streak".to_string(),
+        n => format!("{n}-day streak"),
+    };
+    let minutes = today_seconds / 60;
+    let today_text = if today_seconds >= DAILY_GOAL_SECONDS {
+        format!("{minutes} min today - goal met")
+    } else {
+        format!("{minutes} / {} min today", DAILY_GOAL_SECONDS / 60)
+    };
+
+    ui.set_streak_text(streak_text.into());
+    ui.set_today_text(today_text.into());
+}
+
+/// Credits the time spent on the card currently on screen, then clears it.
+///
+/// Called when a card is rated, when the user leaves the deck, and on exit.
+fn record_study_time(db: &Database, shown_at: &Cell<Option<Instant>>) {
+    let studied = shown_at
+        .take()
+        .map(|shown| shown.elapsed().as_secs().min(MAX_CARD_SECONDS))
+        .unwrap_or(0);
+    if studied == 0 {
+        return;
+    }
+    let day = Local::now().date_naive().format("%Y-%m-%d").to_string();
+    if let Err(err) = db.add_study_seconds(&day, studied) {
+        eprintln!("Failed to record study time: {err}");
+    }
+}
+
+fn show_next_card(
+    ui: &AppWindow,
+    db: &Database,
+    deck: &str,
+    shown_at: &Cell<Option<Instant>>,
+) -> Result<()> {
+    shown_at.set(None);
     match db.get_all_cards(deck) {
         Ok(cards) if !cards.is_empty() => {
             let mut rng = rand::thread_rng();
@@ -83,6 +155,7 @@ fn show_next_card(ui: &AppWindow, db: &Database, deck: &str) -> Result<()> {
             ui.set_card_back(answer.into());
             ui.set_is_revealed(false);
             ui.set_current_state(AppState::Reviewing);
+            shown_at.set(Some(Instant::now()));
         }
         Ok(_) => {
             ui.set_current_card_id(0);
@@ -258,7 +331,26 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "random".to_string());
     ui.set_card_direction(direction.into());
     refresh_deck_lists(&ui, &db);
+    refresh_streak(&ui, &db);
     let db_ref = Rc::new(db);
+    let card_shown_at: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+
+    // Keeps "today" correct and picks up the goal if the app stays open
+    // across midnight.
+    let streak_timer = slint::Timer::default();
+    {
+        let ui_handle = ui.as_weak();
+        let db_ref = db_ref.clone();
+        streak_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(30),
+            move || {
+                if let Some(ui) = ui_handle.upgrade() {
+                    refresh_streak(&ui, db_ref.as_ref());
+                }
+            },
+        );
+    }
 
     ui.on_open_deck_select({
         let ui_handle = ui.as_weak();
@@ -267,6 +359,7 @@ fn main() -> Result<()> {
             if let Some(ui) = ui_handle.upgrade() {
                 ui.set_status_message("".into());
                 refresh_deck_lists(&ui, db_ref.as_ref());
+                refresh_streak(&ui, db_ref.as_ref());
                 ui.set_current_state(AppState::DeckSelect);
             }
         }
@@ -275,8 +368,11 @@ fn main() -> Result<()> {
     ui.on_change_deck({
         let ui_handle = ui.as_weak();
         let db_ref = db_ref.clone();
+        let card_shown_at = card_shown_at.clone();
         move || {
             if let Some(ui) = ui_handle.upgrade() {
+                record_study_time(db_ref.as_ref(), card_shown_at.as_ref());
+                refresh_streak(&ui, db_ref.as_ref());
                 ui.set_status_message("".into());
                 refresh_deck_lists(&ui, db_ref.as_ref());
                 ui.set_current_state(AppState::DeckSelect);
@@ -287,10 +383,16 @@ fn main() -> Result<()> {
     ui.on_select_deck({
         let ui_handle = ui.as_weak();
         let db_ref = db_ref.clone();
+        let card_shown_at = card_shown_at.clone();
         move |deck| {
             if let Some(ui) = ui_handle.upgrade() {
                 let deck = deck.to_string();
-                let _ = show_next_card(&ui, db_ref.as_ref(), &deck);
+                let _ = show_next_card(
+                    &ui,
+                    db_ref.as_ref(),
+                    &deck,
+                    card_shown_at.as_ref(),
+                );
             }
         }
     });
@@ -307,6 +409,7 @@ fn main() -> Result<()> {
     ui.on_rate_card({
         let ui_handle = ui.as_weak();
         let db_ref = db_ref.clone();
+        let card_shown_at = card_shown_at.clone();
         move |rating| {
             if let Some(ui) = ui_handle.upgrade() {
                 let deck = ui.get_selected_deck().to_string();
@@ -320,7 +423,14 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                let _ = show_next_card(&ui, db_ref.as_ref(), &deck);
+                record_study_time(db_ref.as_ref(), card_shown_at.as_ref());
+                refresh_streak(&ui, db_ref.as_ref());
+                let _ = show_next_card(
+                    &ui,
+                    db_ref.as_ref(),
+                    &deck,
+                    card_shown_at.as_ref(),
+                );
             }
         }
     });
@@ -500,6 +610,10 @@ fn main() -> Result<()> {
 
     println!("Shizuka is running! Close the window to exit.");
     ui.run()?;
+
+    // Credit the card that was on screen when the window closed.
+    record_study_time(db_ref.as_ref(), card_shown_at.as_ref());
+    let _ = sync_streak(db_ref.as_ref());
 
     Ok(())
 }

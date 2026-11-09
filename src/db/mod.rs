@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use chrono::{DateTime, NaiveDate, Utc};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use crate::core::{Card, CardState};
+use crate::core::{Card, CardState, Streak};
 
 pub struct Database {
     conn: Connection,
@@ -52,6 +52,14 @@ impl Database {
             )",
             [],
         ).context("Failed to create deck_meta table")?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS daily_activity (
+                day TEXT PRIMARY KEY,
+                seconds INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        ).context("Failed to create daily_activity table")?;
 
         Ok(())
     }
@@ -274,6 +282,70 @@ impl Database {
                 params![key, value],
             )
             .context("Failed to save setting")?;
+        Ok(())
+    }
+
+    /// Adds exercise seconds to a local calendar day and returns the new total.
+    pub fn add_study_seconds(&self, day: &str, seconds: u64) -> Result<u64> {
+        if seconds > 0 {
+            self.conn
+                .execute(
+                    "INSERT INTO daily_activity (day, seconds) VALUES (?1, ?2)
+                     ON CONFLICT(day) DO UPDATE
+                     SET seconds = daily_activity.seconds + excluded.seconds",
+                    params![day, seconds as i64],
+                )
+                .context("Failed to add study time")?;
+        }
+        self.study_seconds(day)
+    }
+
+    /// Returns the exercise seconds recorded for a local calendar day.
+    pub fn study_seconds(&self, day: &str) -> Result<u64> {
+        let seconds: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT seconds FROM daily_activity WHERE day = ?1",
+                params![day],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("Failed to read study time")?;
+        Ok(seconds.unwrap_or(0).max(0) as u64)
+    }
+
+    /// Loads the persisted streak state.
+    pub fn load_streak(&self) -> Result<Streak> {
+        let days = self
+            .get_setting("streak_days")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let last_qualified_day = self
+            .get_setting("streak_last_day")?
+            .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok());
+        Ok(Streak {
+            days,
+            last_qualified_day,
+        })
+    }
+
+    /// Persists the streak state.
+    pub fn save_streak(&self, streak: &Streak) -> Result<()> {
+        self.set_setting("streak_days", &streak.days.to_string())?;
+        match streak.last_qualified_day {
+            Some(day) => self.set_setting(
+                "streak_last_day",
+                &day.format("%Y-%m-%d").to_string(),
+            )?,
+            None => {
+                self.conn
+                    .execute(
+                        "DELETE FROM settings WHERE key = 'streak_last_day'",
+                        [],
+                    )
+                    .context("Failed to clear streak day")?;
+            }
+        }
         Ok(())
     }
 
@@ -551,8 +623,9 @@ mod tests {
 
     #[test]
     fn test_seeding() {
-        cleanup();
-        let db = Database::new(TEST_DB).unwrap();
+        const SEED_DB: &str = "test_shizuka_seed.db";
+        let _ = fs::remove_file(SEED_DB);
+        let db = Database::new(SEED_DB).unwrap();
         db.seed_starter_deck().unwrap();
 
         let cards = db.get_due_cards("Hiragana Characters").unwrap();
@@ -561,6 +634,27 @@ mod tests {
         let words = db.get_due_cards("Kanji Words").unwrap();
         assert!(!words.is_empty());
 
-        cleanup();
+        let _ = fs::remove_file(SEED_DB);
+    }
+
+    #[test]
+    fn test_daily_activity_and_streak_persistence() {
+        const STREAK_DB: &str = "test_shizuka_streak.db";
+        let _ = fs::remove_file(STREAK_DB);
+        let db = Database::new(STREAK_DB).unwrap();
+
+        assert_eq!(db.study_seconds("2026-01-01").unwrap(), 0);
+        assert_eq!(db.add_study_seconds("2026-01-01", 300).unwrap(), 300);
+        assert_eq!(db.add_study_seconds("2026-01-01", 600).unwrap(), 900);
+        assert_eq!(db.study_seconds("2026-01-01").unwrap(), 900);
+
+        let streak = Streak {
+            days: 2,
+            last_qualified_day: NaiveDate::from_ymd_opt(2026, 1, 1),
+        };
+        db.save_streak(&streak).unwrap();
+        assert_eq!(db.load_streak().unwrap(), streak);
+
+        let _ = fs::remove_file(STREAK_DB);
     }
 }

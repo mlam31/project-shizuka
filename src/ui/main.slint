@@ -65,6 +65,8 @@ export component AppWindow inherits Window {
     in-out property <string> status_message: "";
     in-out property <string> import_path: "";
     in-out property <string> card_direction: "random";
+    in-out property <string> streak_text: "No streak yet";
+    in-out property <string> today_text: "0 / 15 min today";
     in property <bool> is_mobile: false;
 
     callback open_deck_select();
@@ -119,6 +121,15 @@ export component AppWindow inherits Window {
                 spacing: 20px;
                 HorizontalLayout { alignment: center; Text { text: "SHIZUKA"; color: #FFFFFF; font-size: 34px; } }
                 HorizontalLayout { alignment: center; Text { text: "Japanese flashcards"; color: #888888; font-size: 16px; } }
+                HorizontalLayout {
+                    alignment: center;
+                    VerticalLayout {
+                        width: min(320px, root.width - 48px);
+                        spacing: 4px;
+                        Text { text: root.streak_text; color: #FFFFFF; font-size: 15px; horizontal-alignment: center; }
+                        Text { text: root.today_text; color: #666666; font-size: 12px; horizontal-alignment: center; }
+                    }
+                }
                 Rectangle { height: 12px; }
                 HorizontalLayout {
                     alignment: center;
