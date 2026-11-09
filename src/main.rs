@@ -600,7 +600,7 @@ fn main() -> Result<()> {
     }
     let (db, db_path) = open_database(&db_path)?;
     println!("Using database: {}", db_path);
-    // db.seed_alphabet_decks()?;
+    db.seed_alphabet_decks()?;
     // Create the import folder up front so it shows up in the Files app on iOS
     // (and is ready for imports on desktop).
     let import_path = import_dir(&db_path);
