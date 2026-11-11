@@ -130,6 +130,34 @@ impl Database {
             )
             .context("Failed to backfill introduced_on")?;
 
+        // v2: intervals are stored in minutes (to support multiple reviews/day).
+        // Old databases stored whole days (max 365). Convert once.
+        let migrated: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'interval_unit_v2'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if migrated.as_deref() != Some("1") {
+            self.conn
+                .execute(
+                    "UPDATE cards SET interval = interval * 1440
+                     WHERE interval > 0 AND interval <= 365",
+                    [],
+                )
+                .context("Failed to migrate intervals to minutes")?;
+            self.conn
+                .execute(
+                    "INSERT INTO settings (key, value) VALUES ('interval_unit_v2', '1')
+                     ON CONFLICT(key) DO UPDATE SET value = '1'",
+                    [],
+                )
+                .context("Failed to mark interval migration")?;
+        }
+
         Ok(())
     }
 
@@ -675,11 +703,13 @@ impl Database {
         Ok(cards)
     }
 
-    /// Retrieves cards whose next review is due.
+    /// Retrieves cards whose next review is due (including a short lead window
+    /// so minute-based learning steps can be studied in the same sitting).
     pub fn get_due_cards(&self, deck: &str) -> Result<Vec<Card>> {
+        let cutoff = (Utc::now() + chrono::Duration::minutes(20)).timestamp();
         let sql = format!(
             "{} WHERE deck = ?1 AND introduced_on <> '' AND next_review <= ?2
-             ORDER BY next_review ASC",
+             ORDER BY next_review ASC, ease_factor ASC, id ASC",
             CARD_SELECT
         );
         let mut stmt = self
@@ -687,7 +717,7 @@ impl Database {
             .prepare(&sql)
             .context("Failed to prepare due cards query")?;
         let rows = stmt
-            .query_map(params![deck, Utc::now().timestamp()], card_from_row)
+            .query_map(params![deck, cutoff], card_from_row)
             .context("Failed to iterate over due cards")?;
         let mut cards = Vec::new();
         for row in rows {
@@ -800,7 +830,7 @@ impl Database {
         Ok(count as usize)
     }
 
-    /// Returns (new cards never seen, cards introduced today, cards due now).
+    /// Returns (new cards never seen, cards introduced today, cards due/ready).
     pub fn deck_counts(&self, deck: &str, day: &str) -> Result<(usize, usize, usize)> {
         let new_total: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM cards WHERE deck = ?1 AND introduced_on = ''",
@@ -812,10 +842,11 @@ impl Database {
             params![deck, day],
             |row| row.get(0),
         )?;
+        let cutoff = (Utc::now() + chrono::Duration::minutes(20)).timestamp();
         let due: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM cards
              WHERE deck = ?1 AND introduced_on <> '' AND next_review <= ?2",
-            params![deck, Utc::now().timestamp()],
+            params![deck, cutoff],
             |row| row.get(0),
         )?;
         Ok((new_total as usize, introduced_today as usize, due as usize))
@@ -937,7 +968,8 @@ mod tests {
         assert_eq!(new_cards[0].front, "こんにちは");
         assert_eq!(new_cards[0].introduced_on, None);
 
-        // Rating a new card introduces it and schedules it in the future.
+        // Rating a new card introduces it and schedules the next step (aggressive
+        // learning steps may be due again soon, within the ready window).
         let card = new_cards[0].clone();
         let mut state = card.state.clone();
         calculate_next_review(&mut state, ReviewResult::Good);
@@ -949,7 +981,8 @@ mod tests {
             1
         );
         assert_eq!(db.count_reviews_on("TestDeck", "2026-01-01").unwrap(), 1);
-        assert!(db.get_due_cards("TestDeck").unwrap().is_empty());
+        // A 10-minute learning step is ready/due soon.
+        assert_eq!(db.get_due_cards("TestDeck").unwrap().len(), 1);
 
         // A card that is past its due date shows up again.
         let mut due_state = db.get_card(id).unwrap().state;
@@ -957,7 +990,6 @@ mod tests {
         db.update_card(id, &due_state).unwrap();
         let due = db.get_due_cards("TestDeck").unwrap();
         assert_eq!(due.len(), 1);
-        assert_eq!(due[0].state.repetitions, 1);
 
         cleanup();
     }

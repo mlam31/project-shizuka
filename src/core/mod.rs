@@ -66,16 +66,20 @@ impl ReviewResult {
     }
 }
 
-/// Stores the state of a flashcard for the SM-2 algorithm.
+/// Stores the state of a flashcard for the scheduling algorithm.
+///
+/// `interval` is stored in minutes so learning/relearning steps can be scheduled
+/// multiple times per day (Anki-like). `next_review` is the source of truth for
+/// when the card is due.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CardState {
-    /// The number of consecutive successful reviews.
+    /// The number of consecutive successful reviews in review mode.
     pub repetitions: u32,
     /// The current ease factor (EF). Minimum is 1.3.
     pub ease_factor: f32,
-    /// The current interval (in days) between reviews.
+    /// The current interval in minutes.
     pub interval: u32,
-    /// The date when the card is next due for review.
+    /// The date/time when the card is next due for review.
     pub next_review: DateTime<Utc>,
 }
 
@@ -113,43 +117,85 @@ pub struct Deck {
     pub name: String,
 }
 
-/// Calculates the next state of a card based on the user's review result using a simplified and more gradual growth algorithm.
+/// Calculates the next state of a card using aggressive, Anki-like
+/// learning/relearning steps so cards can be studied multiple times per day.
+///
+/// `interval` is stored in minutes.
 pub fn calculate_next_review(state: &mut CardState, result: ReviewResult) {
     let q = result.to_quality();
     let now = Utc::now();
 
+    // Learning / relearning (not yet graduated to multi-day review intervals).
+    let in_learning = state.repetitions == 0 || state.interval < 1440;
+
     if q < 3 {
-        // Failure: reset repetitions and decrease ease factor
-        state.repetitions = 0;
-        state.ease_factor = (state.ease_factor - 0.2).max(1.3);
-        state.interval = 1;
-        state.next_review = now + Duration::days(1);
-    } else {
-        // Success
-        state.repetitions += 1;
-
-        if state.repetitions == 1 {
-            state.interval = 1;
-        } else if state.repetitions == 2 {
-            state.interval = 2;
-        } else if state.repetitions == 3 {
-            state.interval = 4;
-        } else if state.repetitions == 4 {
-            state.interval = 7;
-        } else {
-            // Gradual growth: interval increases by the ease factor
-            state.interval = (state.interval as f32 * state.ease_factor) as u32;
-            if state.interval > 180 {
-                state.interval = 365;
-            }
+        // Again: repeat very soon and count as a lapse in review mode.
+        if !in_learning {
+            state.ease_factor = (state.ease_factor - 0.2).max(1.3);
         }
-
-        // Adjust ease factor: EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.01))
-        let adjustment = 0.1 - (q as f32 - 3.0) * 0.1;
-        state.ease_factor = (state.ease_factor + adjustment).max(1.3);
-
-        state.next_review = now + Duration::days(state.interval as i64);
+        state.repetitions = 0;
+        state.interval = 1; // 1 minute
+        state.next_review = now + Duration::minutes(1);
+        return;
     }
+
+    if in_learning {
+        match result {
+            ReviewResult::Hard => {
+                state.repetitions = 0;
+                state.interval = 5; // 5 minutes
+                state.next_review = now + Duration::minutes(5);
+            }
+            ReviewResult::Good => {
+                state.repetitions += 1;
+                if state.repetitions <= 1 {
+                    state.interval = 10; // 10 minutes
+                    state.next_review = now + Duration::minutes(10);
+                } else {
+                    // Graduate: first review interval is 1 day.
+                    state.repetitions = 1;
+                    state.interval = 1440;
+                    state.next_review = now + Duration::days(1);
+                }
+            }
+            ReviewResult::Easy => {
+                // Graduate quickly.
+                state.repetitions = 1;
+                state.interval = 4 * 1440; // 4 days
+                state.next_review = now + Duration::days(4);
+            }
+            ReviewResult::Again => unreachable!(),
+        }
+        // Small ease nudge for learning answers (kept gentle).
+        let adjustment = 0.1 - (q as f32 - 3.0) * 0.05;
+        state.ease_factor = (state.ease_factor + adjustment).max(1.3);
+        return;
+    }
+
+    // Review mode (graduated): Anki-like growth with aggressive same-day recovery
+    // handled above via lapses.
+    state.repetitions += 1;
+    let mut days = (state.interval as f32 / 1440.0).max(1.0);
+    days = match result {
+        ReviewResult::Hard => (days * 1.2).max(days + 1.0),
+        ReviewResult::Good => (days * state.ease_factor).max(days + 1.0),
+        ReviewResult::Easy => (days * state.ease_factor * 1.3).max(days + 2.0),
+        ReviewResult::Again => unreachable!(),
+    };
+    let mut interval_days = days.round() as u32;
+    if interval_days > 365 {
+        interval_days = 365;
+    }
+    state.interval = interval_days.saturating_mul(1440);
+
+    let adjustment = match result {
+        ReviewResult::Hard => -0.15,
+        ReviewResult::Good => 0.0,
+        ReviewResult::Easy => 0.15,
+        ReviewResult::Again => unreachable!(),
+    };
+    state.ease_factor = (state.ease_factor + adjustment).max(1.3);
+    state.next_review = now + Duration::minutes(state.interval as i64);
 }
 
 #[cfg(test)]
@@ -161,14 +207,28 @@ mod tests {
         let state = CardState::default();
         assert_eq!(state.repetitions, 0);
         assert_eq!(state.ease_factor, 2.5);
+        assert_eq!(state.interval, 0);
     }
 
     #[test]
-    fn test_failure_resets_repetitions() {
+    fn test_again_in_learning_is_fast() {
         let mut state = CardState {
-            repetitions: 5,
+            repetitions: 1,
             ease_factor: 2.5,
-            interval: 10,
+            interval: 10, // minutes, still in learning
+            next_review: Utc::now(),
+        };
+        calculate_next_review(&mut state, ReviewResult::Again);
+        assert_eq!(state.repetitions, 0);
+        assert_eq!(state.interval, 1);
+    }
+
+    #[test]
+    fn test_again_in_review_is_lapse() {
+        let mut state = CardState {
+            repetitions: 3,
+            ease_factor: 2.5,
+            interval: 3 * 1440, // graduated review card
             next_review: Utc::now(),
         };
         calculate_next_review(&mut state, ReviewResult::Again);
@@ -178,17 +238,13 @@ mod tests {
     }
 
     #[test]
-    fn test_success_increases_interval() {
-        let mut state = CardState {
-            repetitions: 1,
-            ease_factor: 2.5,
-            interval: 1,
-            next_review: Utc::now(),
-        };
-        // Second successful review (repetitions goes 1 -> 2)
-        calculate_next_review(&mut state, ReviewResult::Good);
-        assert_eq!(state.repetitions, 2);
-        assert_eq!(state.interval, 2);
+    fn test_learning_good_graduates() {
+        let mut state = CardState::default();
+        calculate_next_review(&mut state, ReviewResult::Good); // first step
+        assert_eq!(state.interval, 10);
+        calculate_next_review(&mut state, ReviewResult::Good); // graduate
+        assert!(state.interval >= 1440);
+        assert!(state.next_review > Utc::now());
     }
 
     #[test]
@@ -200,7 +256,6 @@ mod tests {
         assert!(streak.qualify(day));
         assert_eq!(streak.days, 1);
 
-        // Qualifying twice on the same day must not double-count.
         assert!(!streak.qualify(day));
         assert_eq!(streak.days, 1);
     }

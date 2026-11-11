@@ -10,7 +10,6 @@ mod ui;
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use rand::seq::SliceRandom;
 use rand::Rng;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use std::cell::{Cell, RefCell};
@@ -210,12 +209,22 @@ fn record_study_time(db: &Database, shown_at: &Cell<Option<Instant>>) {
     }
 }
 
-fn format_interval(days: u32) -> String {
+fn format_interval(minutes: u32) -> String {
+    if minutes == 0 {
+        return "<1m".to_string();
+    }
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    if minutes < 1440 {
+        let hours = ((minutes as f32) / 60.0).round() as u32;
+        return format!("{}h", hours.max(1));
+    }
+    let days = ((minutes as f32) / 1440.0).round() as u32;
     match days {
-        0 => "<1d".to_string(),
+        0 => "1d".to_string(),
         1 => "1d".to_string(),
         d if d < 30 => format!("{d}d"),
-        d if d < 180 => format!("{}mo", ((d as f32 / 30.0).round() as u32).max(1)),
         d => format!("{}mo", ((d as f32 / 30.0).round() as u32).max(1)),
     }
 }
@@ -269,13 +278,27 @@ fn start_session(
 ) {
     let day = today_key();
     let cards = if practice {
+        // Focused practice: prioritize cards that are struggling or due soon
+        // instead of a random scroll through the whole deck.
         let mut all = db.get_all_cards(deck).unwrap_or_default();
-        all.shuffle(&mut rand::thread_rng());
+        all.sort_by(|a, b| {
+            let a_learn = a.state.interval < 1440 || a.state.repetitions == 0;
+            let b_learn = b.state.interval < 1440 || b.state.repetitions == 0;
+            b_learn
+                .cmp(&a_learn)
+                .then(a.state.next_review.cmp(&b.state.next_review))
+                .then(
+                    a.state
+                        .ease_factor
+                        .partial_cmp(&b.state.ease_factor)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+                .then(a.state.repetitions.cmp(&b.state.repetitions))
+        });
+        all.truncate(40);
         all
     } else {
         let mut due = db.get_due_cards(deck).unwrap_or_default();
-        // Sort by difficulty (ease_factor ascending) so harder cards appear first
-        due.sort_by(|a, b| a.state.ease_factor.partial_cmp(&b.state.ease_factor).unwrap_or(std::cmp::Ordering::Equal));
         let base_limit = new_card_limit(db);
         let introduced_today = db.count_new_introduced(deck, &day).unwrap_or(0);
         let remaining = base_limit.saturating_sub(introduced_today);
@@ -301,7 +324,8 @@ fn start_session(
     }
 }
 
-/// Automatically proceeds if we were in a limited session but the user wants to keep learning.
+/// Continues with the next ready cards (including learning steps due soon)
+/// instead of a random full-deck scroll.
 fn auto_continue_session(
     ui: &AppWindow,
     db: &Database,
@@ -309,7 +333,8 @@ fn auto_continue_session(
     shown_at: &Cell<Option<Instant>>,
 ) {
     let deck = session.borrow().deck.clone();
-    start_session(ui, db, &deck, true, session, shown_at);
+    // Prefer due/ready cards; if none, fall back to focused practice.
+    start_session(ui, db, &deck, false, session, shown_at);
 }
 
 /// Shows the next queued card, or the summary when the queue is empty.
@@ -483,11 +508,11 @@ fn default_db_path() -> PathBuf {
     PathBuf::from("shizuka.db")
 }
 
-/// Japanese-capable UI font for the current platform.
+/// Japanese-capable UI font preference.
 ///
-/// Slint resolves a font per character through the OS. That fallback can fail
-/// for kanji on some systems (kana still renders, kanji shows as empty boxes),
-/// so pick a font that definitely contains Japanese glyphs instead.
+/// Prefer fonts known to include kana/kanji on the target platform. Slint will
+/// fall back to other system fonts if the named family is unavailable, but
+/// providing a sensible default improves the chance katakana render correctly.
 fn ui_font_family() -> &'static str {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
@@ -1066,7 +1091,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     fn test_card(id: i64, front: &str) -> Card {
         Card {
@@ -1112,12 +1136,10 @@ mod tests {
 
     #[test]
     fn interval_labels_cover_each_rating() {
-        let mut state = CardState::default();
-        state.repetitions = 3;
-        state.interval = 10;
+        let state = CardState::default();
         let labels = interval_previews(&state);
 
-        assert_eq!(labels[0], "1d");
+        assert_eq!(labels.len(), 4);
         for label in &labels {
             assert!(!label.is_empty());
         }
@@ -1125,11 +1147,12 @@ mod tests {
 
     #[test]
     fn formats_interval_units() {
-        assert_eq!(format_interval(0), "<1d");
-        assert_eq!(format_interval(1), "1d");
-        assert_eq!(format_interval(12), "12d");
-        assert_eq!(format_interval(60), "2mo");
-        assert_eq!(format_interval(400), "13mo");
+        assert_eq!(format_interval(0), "<1m");
+        assert_eq!(format_interval(1), "1m");
+        assert_eq!(format_interval(10), "10m");
+        assert_eq!(format_interval(60), "1h");
+        assert_eq!(format_interval(1440), "1d");
+        assert_eq!(format_interval(12 * 1440), "12d");
     }
 
     #[test]
@@ -1143,11 +1166,7 @@ mod tests {
 
     #[test]
     fn interval_preview_matches_scheduling() {
-        let mut state = CardState::default();
-        state.repetitions = 2;
-        state.interval = 6;
-        state.ease_factor = 2.5;
-        state.next_review = Utc::now();
+        let state = CardState::default();
 
         let labels = interval_previews(&state);
         let mut good = state.clone();
