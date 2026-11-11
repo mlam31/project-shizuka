@@ -483,6 +483,26 @@ fn default_db_path() -> PathBuf {
     PathBuf::from("shizuka.db")
 }
 
+/// Japanese-capable UI font for the current platform.
+///
+/// Slint resolves a font per character through the OS. That fallback can fail
+/// for kanji on some systems (kana still renders, kanji shows as empty boxes),
+/// so pick a font that definitely contains Japanese glyphs instead.
+fn ui_font_family() -> &'static str {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        "Hiragino Sans"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Yu Gothic UI"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+    {
+        "Noto Sans CJK JP"
+    }
+}
+
 fn import_dir(db_path: &str) -> PathBuf {
     let p = PathBuf::from(db_path);
     p.parent()
@@ -612,6 +632,7 @@ fn main() -> Result<()> {
     }
 
     let ui = AppWindow::new()?;
+    ui.set_ui_font_family(ui_font_family().into());
     #[cfg(target_os = "ios")]
     ui.set_is_mobile(true);
 

@@ -1,10 +1,10 @@
+use crate::core::{Card, CardState, Streak};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use crate::core::{Card, CardState, Streak};
 
 pub struct Database {
     conn: Connection,
@@ -13,8 +13,7 @@ pub struct Database {
 impl Database {
     /// Initializes a new database connection and creates necessary tables.
     pub fn new(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)
-            .context("Failed to open database connection")?;
+        let conn = Connection::open(path).context("Failed to open database connection")?;
 
         let db = Self { conn };
         db.create_tables()?;
@@ -23,64 +22,152 @@ impl Database {
 
     /// Creates the required tables for the application.
     fn create_tables(&self) -> Result<()> {
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS cards (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS cards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 deck TEXT NOT NULL,
                 front TEXT NOT NULL,
                 back TEXT NOT NULL,
+                reading TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                introduced_on TEXT NOT NULL DEFAULT '',
                 repetitions INTEGER NOT NULL,
                 ease_factor REAL NOT NULL,
                 interval INTEGER NOT NULL,
                 next_review INTEGER NOT NULL
             )",
-            [],
-        ).context("Failed to create cards table")?;
+                [],
+            )
+            .context("Failed to create cards table")?;
 
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS settings (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )",
-            [],
-        ).context("Failed to create settings table")?;
+                [],
+            )
+            .context("Failed to create settings table")?;
 
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS deck_meta (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS deck_meta (
                 name TEXT PRIMARY KEY,
                 hidden INTEGER NOT NULL DEFAULT 0
             )",
-            [],
-        ).context("Failed to create deck_meta table")?;
+                [],
+            )
+            .context("Failed to create deck_meta table")?;
 
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS daily_activity (
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS daily_activity (
                 day TEXT PRIMARY KEY,
                 seconds INTEGER NOT NULL DEFAULT 0
             )",
-            [],
-        ).context("Failed to create daily_activity table")?;
+                [],
+            )
+            .context("Failed to create daily_activity table")?;
+
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                card_id INTEGER NOT NULL,
+                deck TEXT NOT NULL,
+                rating INTEGER NOT NULL,
+                reviewed_at INTEGER NOT NULL,
+                reviewed_on TEXT NOT NULL
+            )",
+                [],
+            )
+            .context("Failed to create reviews table")?;
+
+        self.conn
+            .execute(
+                "CREATE INDEX IF NOT EXISTS idx_reviews_deck_day
+             ON reviews (deck, reviewed_on)",
+                [],
+            )
+            .context("Failed to create review index")?;
+
+        self.migrate_cards()?;
+        Ok(())
+    }
+
+    /// Adds columns introduced after the first releases and backfills them.
+    fn migrate_cards(&self) -> Result<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(cards)")?;
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        for (name, definition) in [
+            ("reading", "TEXT NOT NULL DEFAULT ''"),
+            ("notes", "TEXT NOT NULL DEFAULT ''"),
+            ("introduced_on", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !columns.iter().any(|column| column == name) {
+                self.conn
+                    .execute(
+                        &format!("ALTER TABLE cards ADD COLUMN {} {}", name, definition),
+                        [],
+                    )
+                    .with_context(|| format!("Failed to add cards.{}", name))?;
+            }
+        }
+
+        // Cards that already have review progress should not be treated as new
+        // cards after upgrading.
+        self.conn
+            .execute(
+                "UPDATE cards SET introduced_on = '1970-01-01'
+                 WHERE introduced_on = '' AND (repetitions > 0 OR interval > 0)",
+                [],
+            )
+            .context("Failed to backfill introduced_on")?;
 
         Ok(())
     }
 
     /// Creates a new flashcard in a specific deck.
     pub fn save_card(&self, deck: &str, front: &str, back: &str) -> Result<i64> {
+        self.save_card_full(deck, front, back, "", "")
+    }
+
+    /// Creates a new flashcard with an optional reading and notes.
+    pub fn save_card_full(
+        &self,
+        deck: &str,
+        front: &str,
+        back: &str,
+        reading: &str,
+        notes: &str,
+    ) -> Result<i64> {
         let default_state = CardState::default();
 
-        self.conn.execute(
-            "INSERT INTO cards (deck, front, back, repetitions, ease_factor, interval, next_review)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                deck,
-                front,
-                back,
-                default_state.repetitions,
-                default_state.ease_factor,
-                default_state.interval,
-                default_state.next_review.timestamp()
-            ],
-        ).context("Failed to insert new card")?;
+        self.conn
+            .execute(
+                "INSERT INTO cards
+                (deck, front, back, reading, notes, introduced_on,
+                 repetitions, ease_factor, interval, next_review)
+             VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, ?8, ?9)",
+                params![
+                    deck,
+                    front,
+                    back,
+                    reading,
+                    notes,
+                    default_state.repetitions,
+                    default_state.ease_factor,
+                    default_state.interval,
+                    default_state.next_review.timestamp()
+                ],
+            )
+            .context("Failed to insert new card")?;
 
         let id = self.conn.last_insert_rowid();
         Ok(id)
@@ -98,16 +185,51 @@ impl Database {
             (
                 "Hiragana Characters",
                 vec![
-                    ("あ", "a"), ("い", "i"), ("う", "u"), ("え", "e"), ("お", "o"),
-                    ("か", "ka"), ("き", "ki"), ("く", "ku"), ("け", "ke"), ("こ", "ko"),
-                    ("さ", "sa"), ("し", "shi"), ("す", "su"), ("せ", "se"), ("そ", "so"),
-                    ("た", "ta"), ("ち", "chi"), ("つ", "tsu"), ("て", "te"), ("と", "to"),
-                    ("な", "na"), ("に", "ni"), ("ぬ", "nu"), ("ね", "ne"), ("の", "no"),
-                    ("は", "ha"), ("ひ", "hi"), ("ふ", "fu"), ("へ", "he"), ("ほ", "ho"),
-                    ("ま", "ma"), ("み", "mi"), ("む", "mu"), ("め", "me"), ("も", "mo"),
-                    ("や", "ya"), ("ゆ", "yu"), ("よ", "yo"),
-                    ("ら", "ra"), ("り", "ri"), ("る", "ru"), ("れ", "re"), ("ろ", "ro"),
-                    ("わ", "wa"), ("を", "wo"),
+                    ("あ", "a"),
+                    ("い", "i"),
+                    ("う", "u"),
+                    ("え", "e"),
+                    ("お", "o"),
+                    ("か", "ka"),
+                    ("き", "ki"),
+                    ("く", "ku"),
+                    ("け", "ke"),
+                    ("こ", "ko"),
+                    ("さ", "sa"),
+                    ("し", "shi"),
+                    ("す", "su"),
+                    ("せ", "se"),
+                    ("そ", "so"),
+                    ("た", "ta"),
+                    ("ち", "chi"),
+                    ("つ", "tsu"),
+                    ("て", "te"),
+                    ("と", "to"),
+                    ("な", "na"),
+                    ("に", "ni"),
+                    ("ぬ", "nu"),
+                    ("ね", "ne"),
+                    ("の", "no"),
+                    ("は", "ha"),
+                    ("ひ", "hi"),
+                    ("ふ", "fu"),
+                    ("へ", "he"),
+                    ("ほ", "ho"),
+                    ("ま", "ma"),
+                    ("み", "mi"),
+                    ("む", "mu"),
+                    ("め", "me"),
+                    ("も", "mo"),
+                    ("や", "ya"),
+                    ("ゆ", "yu"),
+                    ("よ", "yo"),
+                    ("ら", "ra"),
+                    ("り", "ri"),
+                    ("る", "ru"),
+                    ("れ", "re"),
+                    ("ろ", "ro"),
+                    ("わ", "wa"),
+                    ("を", "wo"),
                     ("ん", "n"),
                 ],
             ),
@@ -173,6 +295,24 @@ impl Database {
             ),
         ];
 
+        let readings: Vec<(&str, &str)> = vec![
+            ("日", "にち / ひ"),
+            ("月", "げつ / つき"),
+            ("火", "か / ひ"),
+            ("水", "すい / みず"),
+            ("木", "もく / き"),
+            ("金", "きん / かね"),
+            ("土", "ど / つち"),
+            ("人", "じん / ひと"),
+            ("山", "さん / やま"),
+            ("川", "せん / かわ"),
+            ("日本", "にほん"),
+            ("学校", "がっこう"),
+            ("先生", "せんせい"),
+            ("学生", "がくせい"),
+            ("時間", "じかん"),
+        ];
+
         for (name, items) in decks {
             let count: i64 = self.conn.query_row(
                 "SELECT COUNT(*) FROM cards WHERE deck = ?1",
@@ -181,7 +321,8 @@ impl Database {
             )?;
             if count == 0 {
                 for (front, back) in items {
-                    self.save_card(name, front, back)?;
+                    let reading = reading_for(&readings, front);
+                    self.save_card_full(name, front, back, &reading, "")?;
                 }
             } else {
                 // Upgrade partially seeded decks (e.g., Hiragana expanded to 46)
@@ -191,8 +332,16 @@ impl Database {
                     .context("Failed to prepare card existence query")?;
                 for (front, back) in items {
                     let exists = stmt.exists(params![name, front])?;
+                    let reading = reading_for(&readings, front);
                     if !exists {
-                        self.save_card(name, front, back)?;
+                        self.save_card_full(name, front, back, &reading, "")?;
+                    } else if !reading.is_empty() {
+                        // Enrich existing seeded cards without overwriting edits.
+                        self.conn.execute(
+                            "UPDATE cards SET reading = ?1
+                             WHERE deck = ?2 AND front = ?3 AND reading = ''",
+                            params![reading, name, front],
+                        )?;
                     }
                 }
             }
@@ -333,52 +482,112 @@ impl Database {
     pub fn save_streak(&self, streak: &Streak) -> Result<()> {
         self.set_setting("streak_days", &streak.days.to_string())?;
         match streak.last_qualified_day {
-            Some(day) => self.set_setting(
-                "streak_last_day",
-                &day.format("%Y-%m-%d").to_string(),
-            )?,
+            Some(day) => {
+                self.set_setting("streak_last_day", &day.format("%Y-%m-%d").to_string())?
+            }
             None => {
                 self.conn
-                    .execute(
-                        "DELETE FROM settings WHERE key = 'streak_last_day'",
-                        [],
-                    )
+                    .execute("DELETE FROM settings WHERE key = 'streak_last_day'", [])
                     .context("Failed to clear streak day")?;
             }
         }
         Ok(())
     }
 
-    /// Exports a deck to CSV (front,back). Returns the path written.
+    /// Exports a deck to CSV (front,back,reading,notes). Returns the path written.
     pub fn export_deck_csv(&self, deck: &str, dir: &Path) -> Result<std::path::PathBuf> {
         fs::create_dir_all(dir).context("Failed to create export directory")?;
         let safe_name: String = deck
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let path = dir.join(format!("{}.csv", safe_name.trim()));
         let mut file = File::create(&path).context("Failed to create export file")?;
-        writeln!(file, "front,back").context("Failed to write CSV header")?;
+        writeln!(file, "front,back,reading,notes").context("Failed to write CSV header")?;
 
         let mut stmt = self
             .conn
-            .prepare("SELECT front, back FROM cards WHERE deck = ?1 ORDER BY id ASC")
+            .prepare(
+                "SELECT front, back, reading, notes FROM cards WHERE deck = ?1 ORDER BY id ASC",
+            )
             .context("Failed to prepare export query")?;
         let rows = stmt.query_map(params![deck], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?;
         for row in rows {
-            let (front, back) = row?;
-            writeln!(file, "{},{}", csv_escape(&front), csv_escape(&back))
-                .context("Failed to write CSV row")?;
+            let (front, back, reading, notes) = row?;
+            writeln!(
+                file,
+                "{},{},{},{}",
+                csv_escape(&front),
+                csv_escape(&back),
+                csv_escape(&reading),
+                csv_escape(&notes)
+            )
+            .context("Failed to write CSV row")?;
         }
         Ok(path)
     }
 
-    /// Imports cards from a CSV file (front,back). Returns (deck_name, imported_count).
+    /// Imports cards from CSV lines with `front,back[,reading[,notes]]`.
+    fn import_csv_records<R: BufRead>(&self, reader: R, name: &str) -> Result<usize> {
+        let mut count = 0usize;
+        for (idx, line) in reader.lines().enumerate() {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let fields = parse_csv_line(line);
+            if idx == 0
+                && fields
+                    .first()
+                    .map(|field| field.trim().eq_ignore_ascii_case("front"))
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            if fields.len() < 2 {
+                continue;
+            }
+            let front = fields[0].trim();
+            let back = fields[1].trim();
+            let reading = fields.get(2).map(|s| s.trim()).unwrap_or("");
+            let notes = fields.get(3).map(|s| s.trim()).unwrap_or("");
+            if front.is_empty() || back.is_empty() {
+                continue;
+            }
+            let exists = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM cards WHERE deck = ?1 AND front = ?2 AND back = ?3 LIMIT 1",
+                    params![name, front, back],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if !exists {
+                self.save_card_full(name, front, back, reading, notes)?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Imports cards from a CSV file. Returns (deck_name, imported_count).
     pub fn import_deck_csv(&self, path: &Path, deck_name: Option<&str>) -> Result<(String, usize)> {
-        let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
-        let reader = BufReader::new(file);
+        let file =
+            File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
         let name = deck_name
             .map(|s| s.to_string())
             .or_else(|| {
@@ -388,36 +597,38 @@ impl Database {
             })
             .unwrap_or_else(|| "Imported Deck".to_string());
 
-        let mut count = 0usize;
-        for (idx, line) in reader.lines().enumerate() {
-            let line = line?;
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if idx == 0 && line.to_ascii_lowercase().starts_with("front") {
-                continue;
-            }
-            let fields = parse_csv_line(line);
-            if fields.len() < 2 {
-                continue;
-            }
-            let front = fields[0].trim();
-            let back = fields[1].trim();
-            if front.is_empty() || back.is_empty() {
-                continue;
-            }
-            let exists = self.conn.query_row(
-                "SELECT 1 FROM cards WHERE deck = ?1 AND front = ?2 AND back = ?3 LIMIT 1",
-                params![name, front, back],
-                |_| Ok(true),
-            ).unwrap_or(false);
-            if !exists {
-                self.save_card(&name, front, back)?;
-                count += 1;
-            }
-        }
+        let count = self.import_csv_records(BufReader::new(file), &name)?;
         Ok((name, count))
+    }
+
+    /// Imports pasted CSV text (no file picker needed on mobile).
+    pub fn import_deck_csv_text(&self, text: &str, deck_name: &str) -> Result<(String, usize)> {
+        let name = if deck_name.trim().is_empty() {
+            "Imported Deck"
+        } else {
+            deck_name.trim()
+        };
+        let count = self.import_csv_records(BufReader::new(text.as_bytes()), name)?;
+        Ok((name.to_string(), count))
+    }
+
+    /// Writes a consistent copy of the database to `path`.
+    ///
+    /// `VACUUM INTO` works while the app keeps using the live connection, so a
+    /// backup never needs to close the database.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        // VACUUM INTO refuses to overwrite, and replacing an old backup is the
+        // expected behaviour when the file name is reused.
+        let _ = fs::remove_file(path);
+        let escaped = path.to_string_lossy().replace('\'', "''");
+        self.conn
+            .execute_batch(&format!("VACUUM INTO '{}'", escaped))
+            .with_context(|| format!("Failed to back up database to {}", path.display()))?;
+        Ok(())
     }
 
     /// Imports all `.csv` files from a directory.
@@ -429,7 +640,12 @@ impl Database {
         for entry in fs::read_dir(dir).context("Failed to read import directory")? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("csv")).unwrap_or(false) {
+            if path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("csv"))
+                .unwrap_or(false)
+            {
                 match self.import_deck_csv(&path, None) {
                     Ok(r) => results.push(r),
                     Err(err) => eprintln!("Failed to import {}: {err}", path.display()),
@@ -439,115 +655,224 @@ impl Database {
         Ok(results)
     }
 
-    /// Retrieves all cards for a deck (practice/review-ahead; ignores due date).
+    /// Retrieves all cards for a deck (practice mode; ignores due dates).
     pub fn get_all_cards(&self, deck: &str) -> Result<Vec<Card>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, deck, front, back, repetitions, ease_factor, interval, next_review
-             FROM cards
-             WHERE deck = ?1
-             ORDER BY next_review ASC, id ASC",
-        ).context("Failed to prepare deck cards query")?;
-
-        let card_iter = stmt.query_map(params![deck], |row| {
-            let next_review_ts = row.get::<_, i64>(7)?;
-            Ok(Card {
-                id: row.get(0)?,
-                deck: row.get(1)?,
-                front: row.get(2)?,
-                back: row.get(3)?,
-                state: CardState {
-                    repetitions: row.get(4)?,
-                    ease_factor: row.get(5)?,
-                    interval: row.get(6)?,
-                    next_review: DateTime::from_timestamp(next_review_ts, 0)
-                        .unwrap_or_else(|| Utc::now()),
-                },
-            })
-        }).context("Failed to iterate over cards")?;
-
+        let sql = format!(
+            "{} WHERE deck = ?1 ORDER BY next_review ASC, id ASC",
+            CARD_SELECT
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .context("Failed to prepare deck cards query")?;
+        let rows = stmt
+            .query_map(params![deck], card_from_row)
+            .context("Failed to iterate over cards")?;
         let mut cards = Vec::new();
-        for card in card_iter {
-            cards.push(card?);
+        for row in rows {
+            cards.push(row?);
         }
         Ok(cards)
     }
 
-    /// Retrieves all cards that are due for review in a specific deck.
+    /// Retrieves cards whose next review is due.
     pub fn get_due_cards(&self, deck: &str) -> Result<Vec<Card>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, deck, front, back, repetitions, ease_factor, interval, next_review
-             FROM cards
-             WHERE deck = ?1 AND next_review <= ?2
+        let sql = format!(
+            "{} WHERE deck = ?1 AND introduced_on <> '' AND next_review <= ?2
              ORDER BY next_review ASC",
-        ).context("Failed to prepare due cards query")?;
-
-        let card_iter = stmt.query_map(params![deck, Utc::now().timestamp()], |row| {
-            let next_review_ts = row.get::<_, i64>(7)?;
-            Ok(Card {
-                id: row.get(0)?,
-                deck: row.get(1)?,
-                front: row.get(2)?,
-                back: row.get(3)?,
-                state: CardState {
-                    repetitions: row.get(4)?,
-                    ease_factor: row.get(5)?,
-                    interval: row.get(6)?,
-                    next_review: DateTime::from_timestamp(next_review_ts, 0)
-                        .unwrap_or_else(|| Utc::now()),
-                },
-            })
-        }).context("Failed to iterate over cards")?;
-
+            CARD_SELECT
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .context("Failed to prepare due cards query")?;
+        let rows = stmt
+            .query_map(params![deck, Utc::now().timestamp()], card_from_row)
+            .context("Failed to iterate over due cards")?;
         let mut cards = Vec::new();
-        for card in card_iter {
-            cards.push(card?);
+        for row in rows {
+            cards.push(row?);
+        }
+        Ok(cards)
+    }
+
+    /// Retrieves up to `limit` cards that have never been introduced.
+    pub fn get_new_cards(&self, deck: &str, limit: usize) -> Result<Vec<Card>> {
+        let sql = format!(
+            "{} WHERE deck = ?1 AND introduced_on = '' ORDER BY id ASC LIMIT ?2",
+            CARD_SELECT
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .context("Failed to prepare new cards query")?;
+        let rows = stmt
+            .query_map(params![deck, limit as i64], card_from_row)
+            .context("Failed to iterate over new cards")?;
+        let mut cards = Vec::new();
+        for row in rows {
+            cards.push(row?);
         }
         Ok(cards)
     }
 
     /// Retrieves a single card by id.
     pub fn get_card(&self, id: i64) -> Result<Card> {
+        let sql = format!("{} WHERE id = ?1", CARD_SELECT);
         self.conn
-            .query_row(
-                "SELECT id, deck, front, back, repetitions, ease_factor, interval, next_review
-                 FROM cards WHERE id = ?1",
-                params![id],
-                |row| {
-                    let next_review_ts = row.get::<_, i64>(7)?;
-                    Ok(Card {
-                        id: row.get(0)?,
-                        deck: row.get(1)?,
-                        front: row.get(2)?,
-                        back: row.get(3)?,
-                        state: CardState {
-                            repetitions: row.get(4)?,
-                            ease_factor: row.get(5)?,
-                            interval: row.get(6)?,
-                            next_review: DateTime::from_timestamp(next_review_ts, 0)
-                                .unwrap_or_else(|| Utc::now()),
-                        },
-                    })
-                },
-            )
+            .query_row(&sql, params![id], card_from_row)
             .context("Failed to load card")
+    }
+
+    /// Records a rating, updates the SRS state, and introduces the card if needed.
+    pub fn record_review(
+        &self,
+        card: &Card,
+        state: &CardState,
+        rating: i32,
+        day: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("Failed to start review transaction")?;
+        if card.introduced_on.is_none() {
+            tx.execute(
+                "UPDATE cards SET repetitions = ?1, ease_factor = ?2, interval = ?3,
+                 next_review = ?4, introduced_on = ?5 WHERE id = ?6",
+                params![
+                    state.repetitions,
+                    state.ease_factor,
+                    state.interval,
+                    state.next_review.timestamp(),
+                    day,
+                    card.id
+                ],
+            )
+            .context("Failed to introduce card")?;
+        } else {
+            tx.execute(
+                "UPDATE cards SET repetitions = ?1, ease_factor = ?2, interval = ?3,
+                 next_review = ?4 WHERE id = ?5",
+                params![
+                    state.repetitions,
+                    state.ease_factor,
+                    state.interval,
+                    state.next_review.timestamp(),
+                    card.id
+                ],
+            )
+            .context("Failed to update card state")?;
+        }
+        tx.execute(
+            "INSERT INTO reviews (card_id, deck, rating, reviewed_at, reviewed_on)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![card.id, card.deck, rating, Utc::now().timestamp(), day],
+        )
+        .context("Failed to log review")?;
+        tx.commit().context("Failed to commit review")?;
+        Ok(())
+    }
+
+    /// Number of cards introduced on a local day.
+    pub fn count_new_introduced(&self, deck: &str, day: &str) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cards WHERE deck = ?1 AND introduced_on = ?2",
+                params![deck, day],
+                |row| row.get(0),
+            )
+            .context("Failed to count new cards")?;
+        Ok(count as usize)
+    }
+
+    /// Number of ratings logged on a local day.
+    pub fn count_reviews_on(&self, deck: &str, day: &str) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM reviews WHERE deck = ?1 AND reviewed_on = ?2",
+                params![deck, day],
+                |row| row.get(0),
+            )
+            .context("Failed to count reviews")?;
+        Ok(count as usize)
+    }
+
+    /// Returns (new cards never seen, cards introduced today, cards due now).
+    pub fn deck_counts(&self, deck: &str, day: &str) -> Result<(usize, usize, usize)> {
+        let new_total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM cards WHERE deck = ?1 AND introduced_on = ''",
+            params![deck],
+            |row| row.get(0),
+        )?;
+        let introduced_today: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM cards WHERE deck = ?1 AND introduced_on = ?2",
+            params![deck, day],
+            |row| row.get(0),
+        )?;
+        let due: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM cards
+             WHERE deck = ?1 AND introduced_on <> '' AND next_review <= ?2",
+            params![deck, Utc::now().timestamp()],
+            |row| row.get(0),
+        )?;
+        Ok((new_total as usize, introduced_today as usize, due as usize))
     }
 
     /// Updates the state of an existing card.
     pub fn update_card(&self, id: i64, state: &CardState) -> Result<()> {
-        self.conn.execute(
-            "UPDATE cards
+        self.conn
+            .execute(
+                "UPDATE cards
              SET repetitions = ?1, ease_factor = ?2, interval = ?3, next_review = ?4
              WHERE id = ?5",
-            params![
-                state.repetitions,
-                state.ease_factor,
-                state.interval,
-                state.next_review.timestamp(),
-                id,
-            ],
-        ).context("Failed to update card state")?;
+                params![
+                    state.repetitions,
+                    state.ease_factor,
+                    state.interval,
+                    state.next_review.timestamp(),
+                    id,
+                ],
+            )
+            .context("Failed to update card state")?;
         Ok(())
     }
+}
+
+/// Columns used by every card query. Keep in sync with [`card_from_row`].
+const CARD_SELECT: &str = "SELECT id, deck, front, back, reading, notes, \
+     repetitions, ease_factor, interval, next_review, introduced_on FROM cards";
+
+/// Builds a [`Card`] from a row selected with [`CARD_SELECT`].
+fn card_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
+    let next_review: i64 = row.get(9)?;
+    let introduced_on: String = row.get(10)?;
+    Ok(Card {
+        id: row.get(0)?,
+        deck: row.get(1)?,
+        front: row.get(2)?,
+        back: row.get(3)?,
+        reading: row.get(4)?,
+        notes: row.get(5)?,
+        state: CardState {
+            repetitions: row.get(6)?,
+            ease_factor: row.get(7)?,
+            interval: row.get(8)?,
+            next_review: DateTime::from_timestamp(next_review, 0).unwrap_or_else(Utc::now),
+        },
+        introduced_on: NaiveDate::parse_from_str(&introduced_on, "%Y-%m-%d").ok(),
+    })
+}
+
+/// Looks up the reading for a seeded card, if one is known.
+fn reading_for(readings: &[(&str, &str)], front: &str) -> String {
+    readings
+        .iter()
+        .find(|(name, _)| *name == front)
+        .map(|(_, reading)| (*reading).to_string())
+        .unwrap_or_default()
 }
 
 fn csv_escape(field: &str) -> String {
@@ -588,6 +913,7 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{calculate_next_review, ReviewResult};
     use std::fs;
 
     const TEST_DB: &str = "test_shizuka.db";
@@ -601,22 +927,37 @@ mod tests {
         cleanup();
         let db = Database::new(TEST_DB).unwrap();
 
-        // Test save with deck
+        // A fresh card is new, not due.
         let id = db.save_card("TestDeck", "こんにちは", "Hello").unwrap();
         assert_eq!(id, 1);
+        assert!(db.get_due_cards("TestDeck").unwrap().is_empty());
 
-        // Test retrieval
-        let cards = db.get_due_cards("TestDeck").unwrap();
-        assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].front, "こんにちは");
+        let new_cards = db.get_new_cards("TestDeck", 10).unwrap();
+        assert_eq!(new_cards.len(), 1);
+        assert_eq!(new_cards[0].front, "こんにちは");
+        assert_eq!(new_cards[0].introduced_on, None);
 
-        // Test update
-        let mut state = cards[0].state.clone();
-        state.repetitions = 10;
-        db.update_card(id, &state).unwrap();
+        // Rating a new card introduces it and schedules it in the future.
+        let card = new_cards[0].clone();
+        let mut state = card.state.clone();
+        calculate_next_review(&mut state, ReviewResult::Good);
+        db.record_review(&card, &state, 2, "2026-01-01").unwrap();
 
-        let updated_cards = db.get_due_cards("TestDeck").unwrap();
-        assert_eq!(updated_cards[0].state.repetitions, 10);
+        assert_eq!(db.get_new_cards("TestDeck", 10).unwrap().len(), 0);
+        assert_eq!(
+            db.count_new_introduced("TestDeck", "2026-01-01").unwrap(),
+            1
+        );
+        assert_eq!(db.count_reviews_on("TestDeck", "2026-01-01").unwrap(), 1);
+        assert!(db.get_due_cards("TestDeck").unwrap().is_empty());
+
+        // A card that is past its due date shows up again.
+        let mut due_state = db.get_card(id).unwrap().state;
+        due_state.next_review = Utc::now() - chrono::Duration::days(1);
+        db.update_card(id, &due_state).unwrap();
+        let due = db.get_due_cards("TestDeck").unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].state.repetitions, 1);
 
         cleanup();
     }
@@ -628,13 +969,42 @@ mod tests {
         let db = Database::new(SEED_DB).unwrap();
         db.seed_starter_deck().unwrap();
 
-        let cards = db.get_due_cards("Hiragana Characters").unwrap();
-        assert!(!cards.is_empty());
+        let cards = db.get_new_cards("Hiragana Characters", 100).unwrap();
+        assert_eq!(cards.len(), 46);
+        assert!(db.get_due_cards("Hiragana Characters").unwrap().is_empty());
 
-        let words = db.get_due_cards("Kanji Words").unwrap();
-        assert!(!words.is_empty());
+        let words = db.get_new_cards("Kanji Words", 100).unwrap();
+        assert_eq!(words.len(), 5);
+        assert_eq!(words[0].reading, "にほん");
 
         let _ = fs::remove_file(SEED_DB);
+    }
+
+    #[test]
+    fn test_csv_text_import_and_backup() {
+        const CSV_DB: &str = "test_shizuka_csv.db";
+        const BACKUP_DB: &str = "test_shizuka_backup.db";
+        let _ = fs::remove_file(CSV_DB);
+        let _ = fs::remove_file(BACKUP_DB);
+        let db = Database::new(CSV_DB).unwrap();
+
+        let csv = "front,back,reading,notes\n食べる,to eat,たべる,Example: ご飯を食べる\n";
+        let (name, count) = db.import_deck_csv_text(csv, "Food").unwrap();
+        assert_eq!(name, "Food");
+        assert_eq!(count, 1);
+        assert_eq!(db.import_deck_csv_text(csv, "Food").unwrap().1, 0);
+
+        let cards = db.get_new_cards("Food", 10).unwrap();
+        assert_eq!(cards[0].reading, "たべる");
+        assert_eq!(cards[0].notes, "Example: ご飯を食べる");
+
+        db.backup_to(std::path::Path::new(BACKUP_DB)).unwrap();
+        assert!(std::path::Path::new(BACKUP_DB).exists());
+        let backup = Database::new(BACKUP_DB).unwrap();
+        assert_eq!(backup.get_new_cards("Food", 10).unwrap().len(), 1);
+
+        let _ = fs::remove_file(CSV_DB);
+        let _ = fs::remove_file(BACKUP_DB);
     }
 
     #[test]

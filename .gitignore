@@ -22,3 +22,6 @@
 /dist/dmg-root/
 /dist/*.exe
 
+
+# stray database created when running the app from dist/
+/dist/shizuka.db

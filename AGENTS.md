@@ -1,6 +1,6 @@
 # Agent notes
 
-## Rebuild the downloadable builds after every app change
+## Rebuild the downloadable builds before every commit into the github repo
 
 `dist/Shizuka.dmg` and `dist/Shizuka-windows.zip` are committed on purpose so
 friends can try the app without Rust or Xcode. After changing Rust/Slint code:

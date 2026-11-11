@@ -11,6 +11,11 @@ serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
 rand = "0.8"
 
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = "0.2"
+objc2-ui-kit = { version = "0.2", features = ["UIPasteboard"] }
+
 [build-dependencies]
 slint-build = "1.12"
 

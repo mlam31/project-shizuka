@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc, Duration};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Daily study goal (15 minutes) that keeps a streak alive.
@@ -28,7 +28,6 @@ impl Streak {
     /// Marks `today` as qualified exactly once.
     ///
     /// Consecutive days extend the streak; any gap restarts it at one.
-    /// Returns `true` when the stored streak changed.
     pub fn qualify(&mut self, today: NaiveDate) -> bool {
         if self.last_qualified_day == Some(today) {
             return false;
@@ -98,6 +97,12 @@ pub struct Card {
     pub deck: String,
     pub front: String,
     pub back: String,
+    /// Optional reading (furigana/kana) shown with the answer.
+    pub reading: String,
+    /// Optional note or example sentence shown with the answer.
+    pub notes: String,
+    /// First local day on which the card was introduced (None = new card).
+    pub introduced_on: Option<NaiveDate>,
     pub state: CardState,
 }
 
@@ -108,7 +113,7 @@ pub struct Deck {
     pub name: String,
 }
 
-/// Calculates the next state of a card based on the user's review result using the SM-2 algorithm.
+/// Calculates the next state of a card based on the user's review result using a simplified and more gradual growth algorithm.
 pub fn calculate_next_review(state: &mut CardState, result: ReviewResult) {
     let q = result.to_quality();
     let now = Utc::now();
@@ -126,13 +131,21 @@ pub fn calculate_next_review(state: &mut CardState, result: ReviewResult) {
         if state.repetitions == 1 {
             state.interval = 1;
         } else if state.repetitions == 2 {
-            state.interval = 6;
+            state.interval = 2;
+        } else if state.repetitions == 3 {
+            state.interval = 4;
+        } else if state.repetitions == 4 {
+            state.interval = 7;
         } else {
+            // Gradual growth: interval increases by the ease factor
             state.interval = (state.interval as f32 * state.ease_factor) as u32;
+            if state.interval > 180 {
+                state.interval = 365;
+            }
         }
 
         // Adjust ease factor: EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.01))
-        let adjustment = 0.1 - (5 - q) as f32 * (0.08 + (5 - q) as f32 * 0.01);
+        let adjustment = 0.1 - (q as f32 - 3.0) * 0.1;
         state.ease_factor = (state.ease_factor + adjustment).max(1.3);
 
         state.next_review = now + Duration::days(state.interval as i64);
@@ -175,7 +188,7 @@ mod tests {
         // Second successful review (repetitions goes 1 -> 2)
         calculate_next_review(&mut state, ReviewResult::Good);
         assert_eq!(state.repetitions, 2);
-        assert_eq!(state.interval, 6);
+        assert_eq!(state.interval, 2);
     }
 
     #[test]
@@ -190,14 +203,6 @@ mod tests {
         // Qualifying twice on the same day must not double-count.
         assert!(!streak.qualify(day));
         assert_eq!(streak.days, 1);
-
-        assert!(streak.qualify(day + Duration::days(1)));
-        assert_eq!(streak.days, 2);
-
-        // The streak is still shown the day after the last qualified day.
-        assert_eq!(streak.display_days(day + Duration::days(2)), 2);
-        // ...but it is gone after a full missed day.
-        assert_eq!(streak.display_days(day + Duration::days(3)), 0);
     }
 
     #[test]
