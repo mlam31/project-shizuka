@@ -69,6 +69,35 @@ component LimitButton inherits Rectangle {
     Text { text: root.label; color: #FFFFFF; font-size: 15px; horizontal-alignment: center; vertical-alignment: center; }
 }
 
+// A yojijukugo: bold kanji, reading, then the English meaning underneath.
+component MottoBlock inherits VerticalLayout {
+    in property <string> kanji;
+    in property <string> romaji: "";
+    in property <string> meaning: "";
+    in property <length> kanji_size: 22px;
+    alignment: center;
+    spacing: 2px;
+    Text {
+        text: root.kanji;
+        color: #FFFFFF;
+        font-size: root.kanji_size;
+        horizontal-alignment: center;
+    }
+    if (root.romaji != "") : Text {
+        text: root.romaji;
+        color: #888888;
+        font-size: 12px;
+        horizontal-alignment: center;
+    }
+    if (root.meaning != "") : Text {
+        text: root.meaning;
+        color: #666666;
+        font-size: 11px;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Shizuka";
     background: #000000;
@@ -100,6 +129,15 @@ export component AppWindow inherits Window {
     in-out property <string> session_progress: "";
     in-out property <string> summary_title: "Session complete";
     in-out property <string> summary_stats: "";
+    // Yojijukugo shown to the learner: kanji / romaji / English meaning.
+    // motto_* is the app-wide phrase (main menu + top strip); summary_* is
+    // picked per session by Rust.
+    in-out property <string> motto_kanji: "";
+    in-out property <string> motto_romaji: "";
+    in-out property <string> motto_meaning: "";
+    in-out property <string> summary_motto_kanji: "";
+    in-out property <string> summary_motto_romaji: "";
+    in-out property <string> summary_motto_meaning: "";
     in-out property <[string]> recap_words: [];
     in-out property <string> streak_text: "No streak yet";
     in-out property <string> today_text: "0 / 15 min today";
@@ -162,6 +200,20 @@ export component AppWindow inherits Window {
             padding-bottom: 24px + root.safe-area-insets.bottom;
             spacing: 16px;
 
+            // The app's motto rides at the top of every working screen
+            // ("fall seven times, stand up eight times" — a missed card is a
+            // step, not a failure).
+            if (root.current_state != AppState.Welcome && root.current_state != AppState.Summary && root.motto_kanji != "") : HorizontalLayout {
+                width: 100%;
+                alignment: center;
+                Text {
+                    text: root.motto_kanji + " · " + root.motto_romaji;
+                    color: #555555;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+            }
+
             // WELCOME
             if (root.current_state == AppState.Welcome) : VerticalLayout {
                 vertical-stretch: 1;
@@ -169,6 +221,16 @@ export component AppWindow inherits Window {
                 spacing: 20px;
                 HorizontalLayout { alignment: center; Text { text: "SHIZUKA"; color: #FFFFFF; font-size: 34px; } }
                 HorizontalLayout { alignment: center; Text { text: "Japanese flashcards"; color: #888888; font-size: 16px; } }
+                if (root.motto_kanji != "") : HorizontalLayout {
+                    alignment: center;
+                    MottoBlock {
+                        width: min(340px, root.width - 48px);
+                        kanji: root.motto_kanji;
+                        romaji: root.motto_romaji;
+                        meaning: root.motto_meaning;
+                        kanji_size: 26px;
+                    }
+                }
                 HorizontalLayout {
                     alignment: center;
                     VerticalLayout {
@@ -491,6 +553,16 @@ export component AppWindow inherits Window {
 
                 HorizontalLayout { width: 100%; alignment: center; Text { text: root.summary_title; color: #FFFFFF; font-size: 24px; } }
                 HorizontalLayout { width: 100%; alignment: center; Text { text: root.summary_stats; color: #BBBBBB; font-size: 14px; horizontal-alignment: center; } }
+                if (root.summary_motto_kanji != "") : HorizontalLayout {
+                    width: 100%;
+                    alignment: center;
+                    MottoBlock {
+                        width: min(360px, root.width - 48px);
+                        kanji: root.summary_motto_kanji;
+                        romaji: root.summary_motto_romaji;
+                        meaning: root.summary_motto_meaning;
+                    }
+                }
 
                 if (root.recap_words.length > 0) : VerticalLayout {
                     width: 100%;

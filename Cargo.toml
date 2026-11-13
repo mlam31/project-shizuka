@@ -18,6 +18,7 @@ objc2-ui-kit = { version = "0.2", features = ["UIPasteboard"] }
 
 [build-dependencies]
 slint-build = "1.12"
+embed-resource = "3.0"
 
 [profile.release]
 strip = true

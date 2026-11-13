@@ -426,6 +426,16 @@ fn show_summary(ui: &AppWindow, db: &Database, session: &RefCell<Session>) {
 
     ui.set_summary_title(title.into());
     ui.set_summary_stats(stats.into());
+    // Missed cards get the "fall and rise" motto; a clean session gets the
+    // progress one.
+    let motto = if recap.is_empty() {
+        &MOTTO_DAILY_PROGRESS
+    } else {
+        &MOTTO_FALL_AND_RISE
+    };
+    ui.set_summary_motto_kanji(motto.kanji.into());
+    ui.set_summary_motto_romaji(motto.romaji.into());
+    ui.set_summary_motto_meaning(motto.meaning.into());
     ui.set_recap_words(ModelRc::new(VecModel::from(recap)));
     ui.set_session_progress("".into());
     ui.set_current_state(AppState::Summary);
@@ -527,6 +537,29 @@ fn ui_font_family() -> &'static str {
         "Noto Sans CJK JP"
     }
 }
+
+/// A yojijukugo shown to the learner: kanji, romaji, and English meaning.
+struct Motto {
+    kanji: &'static str,
+    romaji: &'static str,
+    meaning: &'static str,
+}
+
+/// App-wide motto: the SRS promise behind spaced repetition — a card you miss
+/// is a fall, not a defeat; the scheduler keeps bringing it back until it
+/// sticks, so you "stand up on the eighth try".
+const MOTTO_FALL_AND_RISE: Motto = Motto {
+    kanji: "七転八起き",
+    romaji: "nanakorobi yaoki",
+    meaning: "Fall seven times, stand up eight times",
+};
+
+/// Shown after a clean session: keep the daily streak going.
+const MOTTO_DAILY_PROGRESS: Motto = Motto {
+    kanji: "日進月歩",
+    romaji: "nisshin gepo",
+    meaning: "A little progress every day",
+};
 
 fn import_dir(db_path: &str) -> PathBuf {
     let p = PathBuf::from(db_path);
@@ -658,6 +691,9 @@ fn main() -> Result<()> {
 
     let ui = AppWindow::new()?;
     ui.set_ui_font_family(ui_font_family().into());
+    ui.set_motto_kanji(MOTTO_FALL_AND_RISE.kanji.into());
+    ui.set_motto_romaji(MOTTO_FALL_AND_RISE.romaji.into());
+    ui.set_motto_meaning(MOTTO_FALL_AND_RISE.meaning.into());
     #[cfg(target_os = "ios")]
     ui.set_is_mobile(true);
 

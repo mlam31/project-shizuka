@@ -8,10 +8,17 @@ targets:
     type: application
     platform: iOS
     deploymentTarget: "15.0"
+    settings:
+      base:
+        # White 学 kanji on black, from ios/Assets.xcassets/AppIcon.appiconset
+        # (regenerate with scripts/gen_icon.py).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Info.plist
       properties:
         CFBundleDisplayName: Shizuka
+        CFBundleIcons:
+          CFBundleIconName: AppIcon
         CADisableMinimumFrameDurationOnPhone: true
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
@@ -22,7 +29,8 @@ targets:
             UIWindowSceneSessionRoleApplication:
               - UISceneConfigurationName: Slint
                 UISceneDelegateClassName: SlintWindowSceneDelegate
-    sources: []
+    sources:
+      - Assets.xcassets
     postCompileScripts:
       - script: |
           ./build_for_ios_with_cargo.bash mobile_app
